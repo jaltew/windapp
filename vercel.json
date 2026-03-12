@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/public-wizard/:path*",
+      "destination": "https://staging-wind.madewithpris.me/api/public-wizard/:path*"
+    }
+  ]
+}
