@@ -153,6 +153,11 @@ export function LocationMap({
       }
 
       updateTurbineMarker(turbineMarkerRef.current, map, selectedLocationRef.current);
+      // iOS Safari can settle dynamic viewport height after first paint; force a resize pass.
+      window.requestAnimationFrame(() => {
+        map.resize();
+        updateTurbineMarker(turbineMarkerRef.current, map, selectedLocationRef.current);
+      });
 
       setMapStatus("ready");
       onViewStateChange?.(readViewState(map));
@@ -183,8 +188,7 @@ export function LocationMap({
     });
 
     map.on("zoomend", () => {
-      // Temporary debugging aid for validating step 1 zoom behavior.
-      console.log("[step1-map] zoom changed");
+      updateTurbineMarker(turbineMarkerRef.current, map, selectedLocationRef.current);
     });
 
     return () => {
@@ -193,6 +197,46 @@ export function LocationMap({
       mapRef.current = null;
     };
   }, [onSelectLocation, onViewStateChange]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    const container = mapContainerRef.current;
+
+    if (!map || !container || mapStatus !== "ready") {
+      return;
+    }
+
+    const handleContainerOrViewportResize = () => {
+      map.resize();
+      updateTurbineMarker(turbineMarkerRef.current, map, selectedLocationRef.current);
+    };
+
+    const resizeObserver = new ResizeObserver(() => {
+      handleContainerOrViewportResize();
+    });
+    resizeObserver.observe(container);
+
+    const visualViewport = window.visualViewport;
+    visualViewport?.addEventListener("resize", handleContainerOrViewportResize);
+    window.addEventListener("orientationchange", handleContainerOrViewportResize);
+
+    // Extra resize passes fix initial iPhone Safari paint where controls render
+    // correctly but raster imagery only paints the top region.
+    const startupResizeTimeouts = [0, 120, 350, 900].map((delayMs) => (
+      window.setTimeout(() => {
+        handleContainerOrViewportResize();
+      }, delayMs)
+    ));
+
+    return () => {
+      resizeObserver.disconnect();
+      visualViewport?.removeEventListener("resize", handleContainerOrViewportResize);
+      window.removeEventListener("orientationchange", handleContainerOrViewportResize);
+      startupResizeTimeouts.forEach((timeoutId) => {
+        window.clearTimeout(timeoutId);
+      });
+    };
+  }, [mapStatus]);
 
   useEffect(() => {
     const map = mapRef.current;
