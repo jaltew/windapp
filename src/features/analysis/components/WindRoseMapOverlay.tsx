@@ -1,4 +1,4 @@
-import { type PointerEvent, useRef, useState } from "react";
+import { type PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
 
 interface WindRoseMapOverlayProps {
   actualValues: number[];
@@ -9,7 +9,6 @@ const VIEW_SIZE = 660;
 const INNER_RADIUS = 74;
 const OUTER_RADIUS = 316;
 const GAP_DEGREES = 1.7;
-const ROTATION_DEGREES = 14;
 const SEGMENT_GAP_PX = 1.5;
 type HoverSegment = "actual" | "potential";
 
@@ -18,9 +17,16 @@ interface HoverTarget {
   segment: HoverSegment;
 }
 
+interface TooltipPosition {
+  x: number;
+  y: number;
+}
+
 export function WindRoseMapOverlay({ actualValues, potentialValues }: WindRoseMapOverlayProps) {
   const [hoverTarget, setHoverTarget] = useState<HoverTarget | null>(null);
-  const [hoverTooltipPosition, setHoverTooltipPosition] = useState<{ x: number; y: number } | null>(null);
+  const [hoverTooltipPosition, setHoverTooltipPosition] = useState<TooltipPosition | null>(null);
+  const [pinnedTarget, setPinnedTarget] = useState<HoverTarget | null>(null);
+  const [pinnedTooltipPosition, setPinnedTooltipPosition] = useState<TooltipPosition | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const sliceCount = resolveSliceCount(actualValues, potentialValues);
   const actual = sampleValues(actualValues, sliceCount);
@@ -31,11 +37,48 @@ export function WindRoseMapOverlay({ actualValues, potentialValues }: WindRoseMa
   const ringRange = OUTER_RADIUS - INNER_RADIUS;
   const sectorStep = (Math.PI * 2) / sliceCount;
   const sectorGap = degToRad(GAP_DEGREES);
-  const startOffset = degToRad(-90 + ROTATION_DEGREES);
-  const updateTooltipPosition = (event: PointerEvent<SVGElement>) => {
+  // Align sector 0 to North (top) and advance clockwise to match backend sector angles.
+  const startOffset = degToRad(-90);
+  const activeTarget = pinnedTarget ?? hoverTarget;
+  const activeTooltipPosition = pinnedTooltipPosition ?? hoverTooltipPosition;
+  const isTooltipPinned = pinnedTarget !== null;
+
+  const clearPinnedTarget = () => {
+    setPinnedTarget(null);
+    setPinnedTooltipPosition(null);
+  };
+
+  useEffect(() => {
+    if (!pinnedTarget) {
+      return;
+    }
+
+    const handleWindowPointerDown = (event: PointerEvent) => {
+      const container = containerRef.current;
+      const targetNode = event.target as Node | null;
+
+      if (!container || !targetNode) {
+        return;
+      }
+
+      if (container.contains(targetNode)) {
+        return;
+      }
+
+      clearPinnedTarget();
+    };
+
+    window.addEventListener("pointerdown", handleWindowPointerDown);
+
+    return () => {
+      window.removeEventListener("pointerdown", handleWindowPointerDown);
+    };
+  }, [pinnedTarget]);
+
+  const resolveTooltipPosition = (event: ReactPointerEvent<SVGElement>): TooltipPosition | null => {
     const container = containerRef.current;
     if (!container) {
-      return;
+      return null;
     }
 
     const bounds = container.getBoundingClientRect();
@@ -43,19 +86,63 @@ export function WindRoseMapOverlay({ actualValues, potentialValues }: WindRoseMa
     const rawY = event.clientY - bounds.top;
     const clampedX = Math.max(10, Math.min(rawX, bounds.width - 10));
     const clampedY = Math.max(10, Math.min(rawY, bounds.height - 10));
-    setHoverTooltipPosition({ x: clampedX, y: clampedY });
+    return { x: clampedX, y: clampedY };
   };
-  const setHoveredTarget = (sliceIndex: number, segment: HoverSegment, event: PointerEvent<SVGElement>) => {
+
+  const updateHoverTooltipPosition = (event: ReactPointerEvent<SVGElement>) => {
+    if (pinnedTarget) {
+      return;
+    }
+
+    const nextPosition = resolveTooltipPosition(event);
+    if (!nextPosition) {
+      return;
+    }
+
+    setHoverTooltipPosition(nextPosition);
+  };
+
+  const setHoveredTarget = (sliceIndex: number, segment: HoverSegment, event: ReactPointerEvent<SVGElement>) => {
+    if (pinnedTarget) {
+      return;
+    }
+
     setHoverTarget({ sliceIndex, segment });
-    updateTooltipPosition(event);
+    const nextPosition = resolveTooltipPosition(event);
+    if (!nextPosition) {
+      return;
+    }
+
+    setHoverTooltipPosition(nextPosition);
   };
+
   const clearHoveredTarget = () => {
+    if (pinnedTarget) {
+      return;
+    }
+
     setHoverTarget(null);
     setHoverTooltipPosition(null);
   };
-  const tooltipText = hoverTarget?.segment === "actual"
-    ? "Estimated yearly wind production in sector: 12.345 kWh"
-    : "Potential yearly local wind production in sector: 21.098 kWh";
+
+  const togglePinnedTarget = (sliceIndex: number, segment: HoverSegment, event: ReactPointerEvent<SVGElement>) => {
+    const isSameTarget = pinnedTarget?.sliceIndex === sliceIndex && pinnedTarget.segment === segment;
+    if (isSameTarget) {
+      clearPinnedTarget();
+      return;
+    }
+
+    const nextPosition = resolveTooltipPosition(event);
+    setPinnedTarget({ sliceIndex, segment });
+    if (nextPosition) {
+      setPinnedTooltipPosition(nextPosition);
+    }
+
+    setHoverTarget(null);
+    setHoverTooltipPosition(null);
+  };
+
+  const tooltipText = resolveTooltipText(activeTarget, actual, potential, sliceCount);
 
   return (
     <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center">
@@ -65,6 +152,11 @@ export function WindRoseMapOverlay({ actualValues, potentialValues }: WindRoseMa
           className="pointer-events-auto h-full w-full"
           role="img"
           aria-label="Wind rose overlay"
+          onPointerDown={(event) => {
+            if (event.target === event.currentTarget) {
+              clearPinnedTarget();
+            }
+          }}
         >
           {actual.map((actualValue, index) => {
             const potentialValue = potential[index];
@@ -79,8 +171,8 @@ export function WindRoseMapOverlay({ actualValues, potentialValues }: WindRoseMa
             const exposedSectorPath = describeSectorPath(center, center, actualRadius, potentialRadius, start, end);
             const actualClipId = `overlay-actual-stroke-clip-${index}`;
             const exposedClipId = `overlay-exposed-stroke-clip-${index}`;
-            const isActualHovered = hoverTarget?.sliceIndex === index && hoverTarget.segment === "actual";
-            const isPotentialHovered = hoverTarget?.sliceIndex === index && hoverTarget.segment === "potential";
+            const isActualHovered = activeTarget?.sliceIndex === index && activeTarget.segment === "actual";
+            const isPotentialHovered = activeTarget?.sliceIndex === index && activeTarget.segment === "potential";
 
             return (
               <g key={`overlay-wind-rose-${index}`}>
@@ -116,8 +208,9 @@ export function WindRoseMapOverlay({ actualValues, potentialValues }: WindRoseMa
                       d={exposedSectorPath}
                       fill="rgba(0,0,0,0.001)"
                       onPointerEnter={(event) => setHoveredTarget(index, "potential", event)}
-                      onPointerMove={updateTooltipPosition}
+                      onPointerMove={updateHoverTooltipPosition}
                       onPointerLeave={clearHoveredTarget}
+                      onPointerDown={(event) => togglePinnedTarget(index, "potential", event)}
                       style={{ cursor: "pointer" }}
                     />
                   ) : null}
@@ -150,8 +243,9 @@ export function WindRoseMapOverlay({ actualValues, potentialValues }: WindRoseMa
                     d={actualSectorPath}
                     fill="rgba(0,0,0,0.001)"
                     onPointerEnter={(event) => setHoveredTarget(index, "actual", event)}
-                    onPointerMove={updateTooltipPosition}
+                    onPointerMove={updateHoverTooltipPosition}
                     onPointerLeave={clearHoveredTarget}
+                    onPointerDown={(event) => togglePinnedTarget(index, "actual", event)}
                     style={{ cursor: "pointer" }}
                   />
                 </g>
@@ -169,16 +263,24 @@ export function WindRoseMapOverlay({ actualValues, potentialValues }: WindRoseMa
             );
           })}
         </svg>
-        {hoverTarget && hoverTooltipPosition ? (
+        {activeTarget && activeTooltipPosition ? (
           <div
-            className="pointer-events-none absolute z-30 rounded-[2px] bg-white/95 px-2 py-1 text-[11px] leading-tight text-[#2A2A2A] shadow-[0_1px_4px_rgba(0,0,0,0.2)]"
+            className={`${isTooltipPinned ? "pointer-events-auto" : "pointer-events-none"} absolute z-30 rounded-[2px] bg-white/95 px-2 py-1 text-[11px] leading-tight text-[#2A2A2A] shadow-[0_1px_4px_rgba(0,0,0,0.2)]`}
             style={{
-              left: hoverTooltipPosition.x,
-              top: hoverTooltipPosition.y,
+              left: activeTooltipPosition.x,
+              top: activeTooltipPosition.y,
               transform: "translate(8px, -8px)"
             }}
+            onPointerDown={(event) => {
+              if (!isTooltipPinned) {
+                return;
+              }
+
+              event.stopPropagation();
+              clearPinnedTarget();
+            }}
           >
-            <p>{tooltipText}</p>
+            <p>{tooltipText ?? "No data available."}</p>
           </div>
         ) : null}
       </div>
@@ -206,6 +308,39 @@ function sampleValues(values: number[], targetCount: number): number[] {
     const source = values[Math.max(0, Math.min(values.length - 1, sourceIndex))];
     return Number.isFinite(source) && source > 0 ? source : 0;
   });
+}
+
+function resolveTooltipText(
+  hoverTarget: HoverTarget | null,
+  actualValues: number[],
+  potentialValues: number[],
+  _sliceCount: number
+): string | null {
+  if (!hoverTarget) {
+    return null;
+  }
+
+  const value = hoverTarget.segment === "actual"
+    ? actualValues[hoverTarget.sliceIndex]
+    : potentialValues[hoverTarget.sliceIndex];
+
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return null;
+  }
+
+  const label = hoverTarget.segment === "actual"
+    ? "Estimated yearly wind production"
+    : "Potential yearly local wind production";
+  return `${label} from this sector: ${formatKwh(value)} kWh`;
+}
+
+function formatKwh(value: number): string {
+  const formatter = new Intl.NumberFormat("en-US", {
+    useGrouping: false,
+    maximumFractionDigits: 0
+  });
+
+  return formatter.format(Math.round(value));
 }
 
 function describeSectorPath(

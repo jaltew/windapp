@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { FeatureCollection, Geometry } from "geojson";
 import { DEV_STEP3_CACHE_KEY, LATEST_STEP3_CACHE_KEY, readStorageJson, writeStorageJson } from "../lib/devStep3Storage";
 import { DEFAULT_DEV_STEP3_PAYLOAD } from "../mocks/devStep3Payload";
+import { fetchAnalysisResultFromReport } from "../features/analysis/services/analysisReportApi";
 import { AnalysisLoadingPage, type AnalysisCompletionPayload } from "./AnalysisLoadingPage";
 import type { AnalysisLandcoverBounds, AnalysisLandcoverPreviewEvent, AnalysisResultEvent } from "../types/analysis";
 import type { SelectedLocation } from "../types/location";
@@ -9,10 +10,53 @@ import type { MapViewState } from "../types/map";
 
 export function DevStep3Page() {
   const [payload, setPayload] = useState<AnalysisCompletionPayload>(() => resolveInitialPayload());
+  const [randomQualityScores] = useState<DevStep3QualityScores>(() => ({
+    windResourceScore: resolveRandomScore(),
+    siteUtilizationScore: resolveRandomScore()
+  }));
+  const payloadWithDevScores = useMemo(
+    () => applyDevStep3QualityScores(payload, randomQualityScores),
+    [payload, randomQualityScores]
+  );
+  const step3ChartFallback = useMemo(() => resolveStep3ChartFallback(payload.result), [payload.result]);
+
+  useEffect(() => {
+    const shareToken = payload.result?.shareToken?.trim();
+    if (!shareToken) {
+      return;
+    }
+
+    const abortController = new AbortController();
+
+    void fetchAnalysisResultFromReport(shareToken, { signal: abortController.signal })
+      .then((reportResult) => {
+        if (abortController.signal.aborted) {
+          return;
+        }
+
+        setPayload((currentPayload) => {
+          const nextPayload: AnalysisCompletionPayload = {
+            ...currentPayload,
+            result: mergeResult(currentPayload.result, reportResult)
+          };
+
+          writeStorageJson(DEV_STEP3_CACHE_KEY, nextPayload);
+          return nextPayload;
+        });
+      })
+      .catch(() => {
+        // Keep local payload if report endpoint is unavailable.
+      });
+
+    return () => {
+      abortController.abort();
+    };
+  }, [payload.result?.shareToken]);
+
   return (
     <AnalysisLoadingPage
-      location={payload.location}
-      initialMapView={payload.mapView}
+      location={payloadWithDevScores.location}
+      initialMapView={payloadWithDevScores.mapView}
       onBackToLocation={() => {}}
       onGoToStepTwo={() => {}}
       onGoToStepThree={() => {}}
@@ -23,7 +67,8 @@ export function DevStep3Page() {
       autoStart={false}
       onMapReady={() => {}}
       currentStep="results"
-      initialCompletedAnalysis={payload}
+      initialCompletedAnalysis={payloadWithDevScores}
+      resultsChartFallback={step3ChartFallback}
     />
   );
 }
@@ -40,6 +85,72 @@ function resolveInitialPayload(): AnalysisCompletionPayload {
   }
 
   return DEFAULT_DEV_STEP3_PAYLOAD;
+}
+interface Step3ChartFallback {
+  yearlyProductionKwh: number | null;
+  monthlyProductionKwh: number[] | null;
+}
+
+interface DevStep3QualityScores {
+  windResourceScore: number;
+  siteUtilizationScore: number;
+}
+
+const DEFAULT_STEP3_MONTHLY_CHART_VALUES = normalizeMonthlyChartValues(
+  DEFAULT_DEV_STEP3_PAYLOAD.result?.monthlyProductionKwh ?? null
+);
+const DEFAULT_STEP3_YEARLY_CHART_VALUE = resolveNonNegativeNumber(DEFAULT_DEV_STEP3_PAYLOAD.result?.aepKwh);
+
+function applyDevStep3QualityScores(
+  payload: AnalysisCompletionPayload,
+  qualityScores: DevStep3QualityScores
+): AnalysisCompletionPayload {
+  if (!payload.result) {
+    return payload;
+  }
+
+  return {
+    ...payload,
+    result: {
+      ...payload.result,
+      windResourceScore: qualityScores.windResourceScore,
+      siteUtilizationScore: qualityScores.siteUtilizationScore
+    }
+  };
+}
+
+function resolveRandomScore(): number {
+  return Math.round(Math.random() * 100);
+}
+
+function resolveStep3ChartFallback(result: AnalysisResultEvent | null): Step3ChartFallback {
+  const monthlyFromResult = normalizeMonthlyChartValues(result?.monthlyProductionKwh ?? null);
+  const monthlyProductionKwh = monthlyFromResult ?? DEFAULT_STEP3_MONTHLY_CHART_VALUES;
+  const yearlyFromResult = resolveNonNegativeNumber(result?.aepKwh);
+  const yearlyFromDefaults =
+    DEFAULT_STEP3_YEARLY_CHART_VALUE ??
+    (monthlyProductionKwh ? monthlyProductionKwh.reduce((sum, value) => sum + value, 0) : null);
+
+  return {
+    yearlyProductionKwh: yearlyFromResult ?? yearlyFromDefaults,
+    monthlyProductionKwh
+  };
+}
+
+function normalizeMonthlyChartValues(values: number[] | null): number[] | null {
+  if (!values || values.length !== 12) {
+    return null;
+  }
+
+  return values.map((value) => (Number.isFinite(value) && value >= 0 ? value : 0));
+}
+
+function resolveNonNegativeNumber(value: number | null | undefined): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return null;
+  }
+
+  return value;
 }
 
 function coerceCompletionPayload(value: unknown): AnalysisCompletionPayload | null {
@@ -59,6 +170,33 @@ function coerceCompletionPayload(value: unknown): AnalysisCompletionPayload | nu
     treesGeoJson: coerceFeatureCollection(value.treesGeoJson),
     landcoverPreview: coerceLandcoverPreview(value.landcoverPreview),
     result: coerceResult(value.result)
+  };
+}
+
+function mergeResult(
+  currentResult: AnalysisResultEvent | null,
+  nextResult: AnalysisResultEvent
+): AnalysisResultEvent {
+  if (!currentResult) {
+    return nextResult;
+  }
+
+  return {
+    shareToken: nextResult.shareToken ?? currentResult.shareToken,
+    meanWindSpeed: nextResult.meanWindSpeed ?? currentResult.meanWindSpeed,
+    aepKwh: nextResult.aepKwh ?? currentResult.aepKwh,
+    monthlyProductionKwh: nextResult.monthlyProductionKwh ?? currentResult.monthlyProductionKwh,
+    directionalProductionKwh: nextResult.directionalProductionKwh ?? currentResult.directionalProductionKwh,
+    potentialAepKwh: nextResult.potentialAepKwh ?? currentResult.potentialAepKwh,
+    potentialMonthlyProductionKwh:
+      nextResult.potentialMonthlyProductionKwh ?? currentResult.potentialMonthlyProductionKwh,
+    potentialDirectionalProductionKwh:
+      nextResult.potentialDirectionalProductionKwh ?? currentResult.potentialDirectionalProductionKwh,
+    windRosePercentages: nextResult.windRosePercentages ?? currentResult.windRosePercentages,
+    potentialWindRosePercentages:
+      nextResult.potentialWindRosePercentages ?? currentResult.potentialWindRosePercentages,
+    windResourceScore: nextResult.windResourceScore ?? currentResult.windResourceScore,
+    siteUtilizationScore: nextResult.siteUtilizationScore ?? currentResult.siteUtilizationScore
   };
 }
 
@@ -213,3 +351,4 @@ function coerceOptionalString(value: unknown): string | null {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
+

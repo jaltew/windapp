@@ -1,8 +1,11 @@
 import type { FeatureCollection, Geometry } from "geojson";
 import { useEffect, useMemo, useRef, useState } from "react";
 import resultsTurbineImage from "../../share/26013001 - front copy - with outline copy - cropped.png";
+import mailIcon from "../features/analysis/assets/mail-icon.svg";
+import saveIcon from "../features/analysis/assets/save-icon.svg";
 import { AnalysisLiveMap } from "../features/analysis/components/AnalysisLiveMap";
 import { MonthlyProductionChart } from "../features/analysis/components/MonthlyProductionChart";
+import { fetchAnalysisResultFromReport } from "../features/analysis/services/analysisReportApi";
 import { streamOneShotAnalysis } from "../features/analysis/services/oneShotAnalysisStream";
 import { formatLocationLabel } from "../features/location/lib/locationLabel";
 import type {
@@ -24,6 +27,10 @@ interface AnalysisLoadingPageProps {
   autoStart?: boolean;
   onMapReady?: () => void;
   currentStep?: "loading" | "analysisReview" | "results";
+  resultsChartFallback?: {
+    yearlyProductionKwh: number | null;
+    monthlyProductionKwh: number[] | null;
+  } | null;
 }
 
 export interface AnalysisCompletionPayload {
@@ -54,15 +61,73 @@ const STEP_TWO_TO_THREE_SEGMENT_WIDTH_PCT = 30;
 const STEP_TWO_TO_THREE_PROGRESS_OFFSET_PCT = 10;
 const PROGRESS_ANIMATION_MIN_MS = 320;
 const PROGRESS_ANIMATION_MAX_MS = 1_000;
-const REALISTIC_YEARLY_PRODUCTION_MIN_KWH = 40_000;
-const REALISTIC_YEARLY_PRODUCTION_DEFAULT_KWH = 46_372;
-const QUALITY_LEVEL_LABELS = ["Excelent", "Great", "Good", "Fair", "Poor", "Very Poor"];
+const QUALITY_LEVEL_LABELS = ["Excellent", "Great", "Good", "Fair", "Poor", "Very poor"] as const;
 const QUALITY_SCALE_HEIGHT_PX = 327;
 const QUALITY_SCALE_WIDTH_PX = 128;
 const QUALITY_SCALE_BAR_WIDTH_PX = 29;
 const QUALITY_SCALE_BAR_RIGHT_OFFSET_PX = 20;
 const QUALITY_MARKER_SIZE_PX = 10;
 const QUALITY_MARKER_OFFSET_FROM_BAR_END_PX = 6;
+const QUALITY_MARKER_MIN_TOP_PX = 20;
+const QUALITY_MARKER_MAX_TOP_PX = QUALITY_SCALE_HEIGHT_PX - 20;
+const QUALITY_SCORE_MIN = 0;
+const QUALITY_SCORE_MAX = 100;
+const QUALITY_CALLOUT_HEIGHT_PX = 66;
+const QUALITY_CALLOUT_VERTICAL_GAP_PX = 10;
+const QUALITY_CALLOUT_DOWNWARD_EXTRA_GAP_PX = 6;
+const QUALITY_SCALE_TO_CALLOUT_GAP_PX = 24;
+const QUALITY_CONNECTOR_TEXT_OFFSET_PX = 10;
+const QUALITY_MARKER_LEFT_PX =
+  QUALITY_SCALE_WIDTH_PX - QUALITY_SCALE_BAR_RIGHT_OFFSET_PX + QUALITY_MARKER_OFFSET_FROM_BAR_END_PX;
+const QUALITY_MARKER_RIGHT_PX = QUALITY_MARKER_LEFT_PX + QUALITY_MARKER_SIZE_PX;
+const QUALITY_CONNECTOR_END_X_PX =
+  QUALITY_SCALE_WIDTH_PX + QUALITY_SCALE_TO_CALLOUT_GAP_PX - QUALITY_CONNECTOR_TEXT_OFFSET_PX;
+const QUALITY_CONNECTOR_BEND_RADIUS_PX = 2;
+const QUALITY_TIER_DEFINITIONS = [
+  {
+    label: "Excellent",
+    localWindPotential: "The local area has outstanding wind conditions for wind energy production.",
+    siteWindUtilization: "Wind reaches your turbine from the main wind directions with little to no obstruction."
+  },
+  {
+    label: "Great",
+    localWindPotential: "The local area has strong wind conditions and very good production potential.",
+    siteWindUtilization: "Nearby obstacles have only a small impact on wind from the main wind directions."
+  },
+  {
+    label: "Good",
+    localWindPotential: "Wind conditions in the local area are good and suitable for steady production.",
+    siteWindUtilization: "Some nearby obstacles slightly reduce wind from certain directions."
+  },
+  {
+    label: "Fair",
+    localWindPotential: "Wind conditions are moderate and production potential is limited.",
+    siteWindUtilization: "Nearby obstacles noticeably affect wind from some important wind directions."
+  },
+  {
+    label: "Poor",
+    localWindPotential: "Wind conditions in the local area are weak and limit production potential.",
+    siteWindUtilization: "Major nearby obstacles block key wind directions and reduce production."
+  },
+  {
+    label: "Very poor",
+    localWindPotential: "Wind conditions are very weak and generally unsuitable for wind energy production.",
+    siteWindUtilization: "The turbine is heavily sheltered by nearby obstacles, especially in main wind directions."
+  }
+] as const;
+const QUALITY_CALLOUTS = [
+  {
+    id: "localWindPotential",
+    title: "Local Wind Potential",
+    infoText: "General wind conditions in the local area."
+  },
+  {
+    id: "siteWindUtilization",
+    title: "Site Wind Utilization",
+    infoText: "How nearby obstacles affect the wind at your turbine."
+  }
+] as const;
+type QualityCalloutId = (typeof QUALITY_CALLOUTS)[number]["id"];
 
 export function AnalysisLoadingPage({
   location,
@@ -74,7 +139,8 @@ export function AnalysisLoadingPage({
   initialCompletedAnalysis = null,
   autoStart = true,
   onMapReady,
-  currentStep = "loading"
+  currentStep = "loading",
+  resultsChartFallback = null
 }: AnalysisLoadingPageProps) {
   const isResultsCompleted = currentStep === "analysisReview" || currentStep === "results";
   const isStepTwoActive = currentStep === "loading" || currentStep === "analysisReview";
@@ -87,7 +153,9 @@ export function AnalysisLoadingPage({
   const [treesGeoJson, setTreesGeoJson] = useState<FeatureCollection<Geometry> | null>(null);
   const [landcoverPreview, setLandcoverPreview] = useState<AnalysisLandcoverPreviewEvent | null>(null);
   const [result, setResult] = useState<AnalysisResultEvent | null>(null);
-  const [yearlyProductionInput, setYearlyProductionInput] = useState("");
+  const [activeQualityCalloutInfoId, setActiveQualityCalloutInfoId] = useState<QualityCalloutId | null>(null);
+  const [hoveredQualityCalloutInfoId, setHoveredQualityCalloutInfoId] = useState<QualityCalloutId | null>(null);
+  const [isTouchLikeCalloutInput, setIsTouchLikeCalloutInput] = useState(false);
   const stepTwoToThreeProgressWidth = `${mapProgressToStepLinkWidth(displayProgressPercent).toFixed(2)}%`;
   const latestMapViewRef = useRef<MapViewState | null>(initialMapView);
   const latestBuildingsGeoJsonRef = useRef<FeatureCollection<Geometry> | null>(null);
@@ -103,13 +171,16 @@ export function AnalysisLoadingPage({
     lon: location.longitude,
     address: toAnalysisAddress(location)
   }), [location]);
-  const parsedYearlyProduction = parsePositiveNumber(yearlyProductionInput);
-  const defaultYearlyProductionKwh = resolveRealisticYearlyProduction(result?.aepKwh);
-  const yearlyProductionKwh = parsedYearlyProduction ?? defaultYearlyProductionKwh;
-  const monthlyProductionValues = useMemo(() => {
-    const monthlyProfile = resolveMonthlyProfile(result?.monthlyProductionKwh ?? null);
-    return monthlyProfile.map((ratio) => ratio * yearlyProductionKwh);
-  }, [result?.monthlyProductionKwh, yearlyProductionKwh]);
+  const fallbackYearlyProductionKwh = resolveApiYearlyProduction(resultsChartFallback?.yearlyProductionKwh ?? null);
+  const fallbackMonthlyProductionValues = useMemo(
+    () => resolveApiMonthlyProduction(resultsChartFallback?.monthlyProductionKwh ?? null),
+    [resultsChartFallback?.monthlyProductionKwh]
+  );
+  const yearlyProductionKwh = resolveApiYearlyProduction(result?.aepKwh) ?? fallbackYearlyProductionKwh;
+  const monthlyProductionValues = useMemo(
+    () => resolveApiMonthlyProduction(result?.monthlyProductionKwh ?? null) ?? fallbackMonthlyProductionValues,
+    [fallbackMonthlyProductionValues, result?.monthlyProductionKwh]
+  );
   const apiWindRoseActualValues = useMemo(() => {
     if (result?.directionalProductionKwh && result.directionalProductionKwh.length > 0) {
       return sanitizePositiveValues(result.directionalProductionKwh);
@@ -137,7 +208,7 @@ export function AnalysisLoadingPage({
       return apiWindRoseActualValues;
     }
 
-    if (yearlyProductionKwh > 0) {
+    if (yearlyProductionKwh !== null && yearlyProductionKwh > 0) {
       return normalizeToShares(DEFAULT_DIRECTION_STRENGTH).map((share) => share * yearlyProductionKwh);
     }
 
@@ -156,8 +227,29 @@ export function AnalysisLoadingPage({
     return mapWindRoseActualValues.map((value) => value * 1.25);
   }, [apiWindRosePotentialValues, mapWindRoseActualValues, result?.potentialAepKwh]);
   const qualityMarkerPositions = useMemo(
-    () => resolveRandomQualityMarkerPositions(2, 20, QUALITY_SCALE_HEIGHT_PX - 20, 34),
-    []
+    () => resolveQualityMarkerPositionsFromScores(result?.windResourceScore, result?.siteUtilizationScore),
+    [result?.windResourceScore, result?.siteUtilizationScore]
+  );
+  const qualityCallouts = useMemo(
+    () => {
+      const positionedCallouts = resolveQualityCalloutPositions(qualityMarkerPositions);
+
+      return positionedCallouts.map(({ index, topPx, markerTopPx, isMoved }) => {
+        const callout = QUALITY_CALLOUTS[index];
+        const qualityTierIndex = markerTopPxToClosestQualityTierIndex(markerTopPx);
+        const tier = QUALITY_TIER_DEFINITIONS[qualityTierIndex];
+
+        return {
+          ...callout,
+          description: tier[callout.id],
+          topPx,
+          markerTopPx,
+          calloutCenterTopPx: topPx + QUALITY_CALLOUT_HEIGHT_PX / 2,
+          isMoved
+        };
+      });
+    },
+    [qualityMarkerPositions]
   );
 
   useEffect(() => {
@@ -173,10 +265,6 @@ export function AnalysisLoadingPage({
     setTreesGeoJson(initialCompletedAnalysis.treesGeoJson);
     setLandcoverPreview(initialCompletedAnalysis.landcoverPreview);
     setResult(initialCompletedAnalysis.result);
-    setYearlyProductionInput(
-      Math.round(resolveRealisticYearlyProduction(initialCompletedAnalysis.result?.aepKwh)).toString()
-    );
-
     latestBuildingsGeoJsonRef.current = initialCompletedAnalysis.buildingsGeoJson;
     latestTreesGeoJsonRef.current = initialCompletedAnalysis.treesGeoJson;
     latestLandcoverPreviewRef.current = initialCompletedAnalysis.landcoverPreview;
@@ -205,12 +293,27 @@ export function AnalysisLoadingPage({
     setTreesGeoJson(null);
     setLandcoverPreview(null);
     setResult(null);
-    setYearlyProductionInput("");
     latestBuildingsGeoJsonRef.current = null;
     latestTreesGeoJsonRef.current = null;
     latestLandcoverPreviewRef.current = null;
     latestResultRef.current = null;
     completionNotifiedRef.current = false;
+
+    const publishAnalysisSnapshot = (
+      nextBuildingsGeoJson: FeatureCollection<Geometry> | null,
+      nextTreesGeoJson: FeatureCollection<Geometry> | null,
+      nextLandcoverPreview: AnalysisLandcoverPreviewEvent | null,
+      nextResult: AnalysisResultEvent | null
+    ) => {
+      onAnalysisComplete?.({
+        location,
+        mapView: latestMapViewRef.current,
+        buildingsGeoJson: nextBuildingsGeoJson ?? latestBuildingsGeoJsonRef.current,
+        treesGeoJson: nextTreesGeoJson ?? latestTreesGeoJsonRef.current,
+        landcoverPreview: nextLandcoverPreview ?? latestLandcoverPreviewRef.current,
+        result: nextResult ?? latestResultRef.current
+      });
+    };
 
     const notifyAnalysisComplete = (
       nextBuildingsGeoJson: FeatureCollection<Geometry> | null,
@@ -223,14 +326,16 @@ export function AnalysisLoadingPage({
       }
 
       completionNotifiedRef.current = true;
-      onAnalysisComplete?.({
-        location,
-        mapView: latestMapViewRef.current,
-        buildingsGeoJson: nextBuildingsGeoJson ?? latestBuildingsGeoJsonRef.current,
-        treesGeoJson: nextTreesGeoJson ?? latestTreesGeoJsonRef.current,
-        landcoverPreview: nextLandcoverPreview ?? latestLandcoverPreviewRef.current,
-        result: nextResult ?? latestResultRef.current
-      });
+      publishAnalysisSnapshot(nextBuildingsGeoJson, nextTreesGeoJson, nextLandcoverPreview, nextResult);
+    };
+
+    const publishAnalysisUpdate = (
+      nextBuildingsGeoJson: FeatureCollection<Geometry> | null,
+      nextTreesGeoJson: FeatureCollection<Geometry> | null,
+      nextLandcoverPreview: AnalysisLandcoverPreviewEvent | null,
+      nextResult: AnalysisResultEvent | null
+    ) => {
+      publishAnalysisSnapshot(nextBuildingsGeoJson, nextTreesGeoJson, nextLandcoverPreview, nextResult);
     };
 
     void streamOneShotAnalysis(analysisRequest, {
@@ -282,16 +387,37 @@ export function AnalysisLoadingPage({
               setTreesGeoJson(event.data.treesGeoJson);
             }
             break;
-          case "result":
+          case "result": {
             setProgressPercent(100);
             setProgressText(PROGRESS_COPY.complete);
-            latestResultRef.current = event.data;
-            setResult(event.data);
-            setYearlyProductionInput(
-              Math.round(resolveRealisticYearlyProduction(event.data.aepKwh)).toString()
-            );
-            notifyAnalysisComplete(null, null, null, event.data);
+
+            const streamedResult = event.data;
+            latestResultRef.current = streamedResult;
+            setResult(streamedResult);
+            notifyAnalysisComplete(null, null, null, streamedResult);
+
+            const shareToken = streamedResult.shareToken?.trim();
+            if (!shareToken) {
+              break;
+            }
+
+            void fetchAnalysisResultFromReport(shareToken, { signal: abortController.signal })
+              .then((reportResult) => {
+                if (!isActive || abortController.signal.aborted) {
+                  return;
+                }
+
+                const mergedResult = mergeAnalysisResults(latestResultRef.current, reportResult);
+                latestResultRef.current = mergedResult;
+                setResult(mergedResult);
+                publishAnalysisUpdate(null, null, null, mergedResult);
+              })
+              .catch(() => {
+                // Keep streamed result if report endpoint is unavailable.
+              });
+
             break;
+          }
           case "error":
             setProgressText(event.data.message || "Analysis failed to complete.");
             break;
@@ -376,10 +502,17 @@ export function AnalysisLoadingPage({
     };
   }, []);
 
+  useEffect(() => {
+    if (currentStep !== "results") {
+      setActiveQualityCalloutInfoId(null);
+      setHoveredQualityCalloutInfoId(null);
+    }
+  }, [currentStep]);
+
   return (
-    <main className="min-h-screen">
-      <div className="mx-auto max-w-6xl px-5 pb-6 pt-2 sm:px-8 sm:pb-10 lg:pb-12 lg:pt-4">
-        <section className="mx-auto -mt-1 mb-3 max-w-[460px] sm:mb-4">
+    <main className="min-h-[100dvh] sm:min-h-screen">
+      <div className="mx-auto max-w-6xl pb-0 pt-3 sm:px-8 sm:pb-10 lg:pb-12 lg:pt-4">
+        <section className="mx-auto mb-3 max-w-[460px] px-3 sm:mb-4 sm:px-0">
           <div className="relative">
             <div className="pointer-events-none absolute left-[20%] right-[20%] top-[11px] h-[2px] bg-[#EAEAEA]" />
             <div className="pointer-events-none absolute left-[20%] right-1/2 top-[11px] h-[2px] bg-[#5A5A5A]" />
@@ -465,7 +598,7 @@ export function AnalysisLoadingPage({
           </div>
         </section>
 
-        <section className="mx-auto -mx-5 max-w-none border-y border-x-0 border-[#CDCDCD] bg-white p-2.5 shadow-[0_1px_9px_4px_rgba(181,181,181,0.1804)] sm:mx-auto sm:max-w-[700px] sm:rounded-[2px] sm:border sm:p-4">
+        <section className="mx-auto max-w-none border-y border-x-0 border-[#CDCDCD] bg-white p-0 shadow-none sm:mx-auto sm:max-w-[700px] sm:rounded-[2px] sm:border sm:border-[#CDCDCD] sm:p-4 sm:shadow-[0_1px_9px_4px_rgba(181,181,181,0.1804)]">
           <AnalysisLiveMap
             selectedLocation={location}
             initialViewState={initialMapView}
@@ -482,24 +615,25 @@ export function AnalysisLoadingPage({
           />
           {currentStep === "results" ? (
             <>
-              <div className="mt-3 flex flex-wrap justify-end gap-2">
-                <div className="flex min-h-[30px] items-center rounded-[2px] bg-[#ECECEC] px-3 py-1.5 text-[12px] text-[#111111]">
-                  <span className="h-3.5 w-3.5 shrink-0 self-center rounded-[2px] border border-white bg-white/60" />
-                  <span className="ml-2 self-center leading-none">Local Wind Potential</span>
-                  <LegendInfoHint text="Lirum larum about site wind potential for this location." />
-                </div>
-                <div className="flex min-h-[30px] items-center rounded-[2px] bg-[#ECECEC] px-3 py-1.5 text-[12px] text-[#111111]">
-                  <span className="h-3.5 w-28 shrink-0 self-center rounded-[2px] bg-[linear-gradient(to_right,#22c55e_0%,#fbbf24_50%,#f87171_100%)]" />
-                  <span className="ml-2 self-center leading-none">Site Utilization Score</span>
-                  <LegendInfoHint text="Lirum larum about utilization from favorable to less favorable directions." />
-                </div>
+              <div className="mt-3 flex flex-wrap justify-end gap-1 px-3 sm:gap-2 sm:px-0">
+                <LegendTooltipItem
+                  label="Local Wind Potential"
+                  infoText="Indicates the strength of the wind coming from each direction in the local area. Larger sections mean more wind energy is typically available from that direction."
+                  swatchVariant="solid"
+                  tooltipAlign="left"
+                />
+                <LegendTooltipItem
+                  label="Site Utilization Score"
+                  infoText="Shows how nearby obstacles affect the wind reaching the turbine from each direction. Green indicates good wind exposure, while red indicate wind reduced by buildings, trees, or terrain."
+                  swatchVariant="gradient"
+                />
               </div>
-              <div className="mt-3 -mx-2.5 border-t border-[#CDCDCD] sm:-mx-4" aria-hidden />
+              <div className="mt-3 border-t border-[#CDCDCD] sm:-mx-4" aria-hidden />
             </>
           ) : null}
 
           {currentStep !== "results" ? (
-            <div className="relative mt-3 h-14 overflow-hidden rounded-[2px] border border-[#CDCDCD] bg-white sm:mt-4">
+            <div className="relative mx-3 mb-4 mt-3 h-14 overflow-hidden rounded-[2px] border border-[#CDCDCD] bg-white sm:mx-0 sm:mb-0 sm:mt-4">
               <div
                 className="absolute inset-y-0 left-0 bg-[#EAEAEA] transition-[width] duration-500"
                 style={{ width: `${displayProgressPercent}%` }}
@@ -512,7 +646,7 @@ export function AnalysisLoadingPage({
             </div>
           ) : result ? (
             <div className="mt-3">
-              <section className="relative -mx-2.5 h-[534px] overflow-hidden sm:-mx-4">
+              <section className="relative h-[534px] overflow-hidden sm:-mx-4">
                 <div
                   className="pointer-events-none absolute inset-x-0 bottom-0 h-[389px]"
                   style={{
@@ -521,16 +655,39 @@ export function AnalysisLoadingPage({
                   }}
                   aria-hidden
                 />
-                <div className="relative z-10 mx-2.5 sm:mx-4">
-                  <div className="pl-3 pr-7 pt-7">
-                    <header className="ml-4">
+                <div className="relative z-10 sm:mx-4">
+                  <div className="pl-3 pr-3 pt-7 sm:pr-7">
+                    <header className="ml-1 sm:ml-4">
                       <p className="text-[13px] font-bold text-[#474747]">WM 25 kW</p>
-                      <h2 className="mt-1.5 text-[40px] font-light leading-none text-[#474747]">Results</h2>
+                      <h2 className="-ml-[3px] mt-1.5 text-[40px] font-light leading-none text-[#474747]">Results</h2>
                     </header>
-                    <div className="ml-4 mt-9 flex items-start gap-6">
+                    <div className="relative mt-9 flex w-[min(352px,calc(100%-8px))] items-start mx-auto sm:mx-0 sm:ml-4 sm:w-[352px]" style={{ gap: `${QUALITY_SCALE_TO_CALLOUT_GAP_PX}px` }}>
+                      <svg
+                        className="pointer-events-none absolute left-0 top-0 z-10"
+                        style={{ width: `${QUALITY_CONNECTOR_END_X_PX}px`, height: `${QUALITY_SCALE_HEIGHT_PX}px` }}
+                        aria-hidden
+                      >
+                        {qualityCallouts.map((callout) => (
+                          <path
+                            key={`${callout.title}-connector`}
+                            d={describeQualityConnectorPath({
+                              startX: QUALITY_MARKER_RIGHT_PX,
+                              startY: callout.markerTopPx,
+                              endX: QUALITY_CONNECTOR_END_X_PX,
+                              endY: callout.calloutCenterTopPx,
+                              useRoutedPath: callout.isMoved,
+                              bendRadiusPx: QUALITY_CONNECTOR_BEND_RADIUS_PX
+                            })}
+                            fill="none"
+                            stroke="#474747"
+                            strokeWidth="1.5"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
+                        ))}
+                      </svg>
                       <div
-                        className="relative"
-                        style={{ width: `${QUALITY_SCALE_WIDTH_PX}px`, height: `${QUALITY_SCALE_HEIGHT_PX}px` }}
+                        className="relative shrink-0" style={{ width: `${QUALITY_SCALE_WIDTH_PX}px`, height: `${QUALITY_SCALE_HEIGHT_PX}px` }}
                       >
                         {QUALITY_LEVEL_LABELS.map((label, index) => {
                           const topPx = 20 + (index * (QUALITY_SCALE_HEIGHT_PX - 40)) / (QUALITY_LEVEL_LABELS.length - 1);
@@ -563,7 +720,7 @@ export function AnalysisLoadingPage({
                             className="absolute z-20 rounded-full"
                             style={{
                               top: `${topPx}px`,
-                              left: `${QUALITY_SCALE_WIDTH_PX - QUALITY_SCALE_BAR_RIGHT_OFFSET_PX + QUALITY_MARKER_OFFSET_FROM_BAR_END_PX}px`,
+                              left: `${QUALITY_MARKER_LEFT_PX}px`,
                               width: `${QUALITY_MARKER_SIZE_PX}px`,
                               height: `${QUALITY_MARKER_SIZE_PX}px`,
                               transform: "translateY(-50%)",
@@ -574,9 +731,62 @@ export function AnalysisLoadingPage({
                           />
                         ))}
                       </div>
-                      <div className="pl-12 pt-32 text-[#474747]">
-                        <p className="text-[14px] font-bold leading-tight">Missing section</p>
-                        <p className="mt-1 text-[14px] leading-tight">In development</p>
+                      <div
+                        className="relative min-w-0 flex-1 sm:flex-none sm:w-[200px]" style={{ height: `${QUALITY_SCALE_HEIGHT_PX}px` }}
+                      >
+                        {qualityCallouts.map((callout) => (
+                          <section
+                            key={callout.title}
+                            className="absolute left-0 flex flex-col justify-center text-[#474747]"
+                            style={{
+                              top: `${callout.topPx}px`,
+                              width: "100%",
+                              height: `${QUALITY_CALLOUT_HEIGHT_PX}px`
+                            }}
+                          >
+                            <button
+                              type="button"
+                              className="relative -mx-1 w-[calc(100%+0.5rem)] rounded-[2px] px-1 py-0.5 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#9A9A9A]"
+                              onPointerDown={(event) => {
+                                const isTouchLike = event.pointerType !== "mouse";
+                                setIsTouchLikeCalloutInput(isTouchLike);
+                                if (isTouchLike) {
+                                  setHoveredQualityCalloutInfoId(null);
+                                }
+                              }}
+                              onMouseEnter={() => {
+                                if (!isTouchLikeCalloutInput) {
+                                  setHoveredQualityCalloutInfoId(callout.id);
+                                }
+                              }}
+                              onMouseLeave={() => {
+                                if (!isTouchLikeCalloutInput) {
+                                  setHoveredQualityCalloutInfoId((currentId) => (currentId === callout.id ? null : currentId));
+                                }
+                              }}
+                              onClick={() => {
+                                setActiveQualityCalloutInfoId((currentId) => (currentId === callout.id ? null : callout.id));
+                              }}
+                              aria-label={`${callout.title}. More info`}
+                              aria-expanded={
+                                activeQualityCalloutInfoId === callout.id
+                                || (!isTouchLikeCalloutInput && hoveredQualityCalloutInfoId === callout.id)
+                              }
+                            >
+                              <p className="flex flex-wrap items-center text-[12px] font-bold leading-tight">
+                                <span>{callout.title}</span>
+                                <LegendInfoHint
+                                  text={callout.infoText}
+                                  isOpen={
+                                    activeQualityCalloutInfoId === callout.id
+                                    || (!isTouchLikeCalloutInput && hoveredQualityCalloutInfoId === callout.id)
+                                  }
+                                />
+                              </p>
+                            </button>
+                            <p className="mt-0.5 px-0.5 text-[12px] leading-[1.2em]">{callout.description}</p>
+                          </section>
+                        ))}
                       </div>
                     </div>
                   </div>
@@ -584,12 +794,39 @@ export function AnalysisLoadingPage({
                 <img
                   src={resultsTurbineImage}
                   alt="WM 25 kW results illustration"
-                  className="absolute -bottom-px right-1 block h-[534px] w-auto max-w-none object-contain"
+                  className="absolute -bottom-px right-1 hidden h-[534px] w-auto max-w-none object-contain sm:block"
                 />
               </section>
-              <div className="-mx-2.5 border-t border-[#CDCDCD] sm:-mx-4" aria-hidden />
+              <div className="border-t border-[#CDCDCD] sm:-mx-4" aria-hidden />
 
               <MonthlyProductionChart values={monthlyProductionValues} yearlyProductionKwh={yearlyProductionKwh} />
+              <div className="border-t border-[#CDCDCD] sm:-mx-4" aria-hidden />
+              <section className="bg-[#F8F8F8] px-3 py-6 sm:-mx-4 sm:-mb-4 sm:px-7" aria-label="Section 3 actions">
+                <div className="flex min-h-[248px] items-center justify-center">
+                  <div className="flex flex-wrap items-center justify-center gap-4 sm:gap-6">
+                    <button
+                      type="button"
+                      className="group flex w-[160px] flex-col items-center rounded-[2px] text-[#4D4D4D] transition-colors hover:text-[#2F2F2F]"
+                      aria-label="Save result"
+                    >
+                      <span className="flex h-[132px] w-[132px] items-center justify-center rounded-[2px] border border-[#D5D5D5] bg-white transition-all duration-150 group-hover:-translate-y-0.5 group-hover:border-[#BEBEBE] group-hover:shadow-[0_2px_6px_rgba(0,0,0,0.12)]">
+                        <img src={saveIcon} alt="" aria-hidden className="h-6 w-6" />
+                      </span>
+                      <span className="mt-3 text-[16px] font-extralight tracking-[0.01em]">Save result</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="group flex w-[160px] flex-col items-center rounded-[2px] text-[#4D4D4D] transition-colors hover:text-[#2F2F2F]"
+                      aria-label="Get expert review"
+                    >
+                      <span className="flex h-[132px] w-[132px] items-center justify-center rounded-[2px] border border-[#D5D5D5] bg-white transition-all duration-150 group-hover:-translate-y-0.5 group-hover:border-[#BEBEBE] group-hover:shadow-[0_2px_6px_rgba(0,0,0,0.12)]">
+                        <img src={mailIcon} alt="" aria-hidden className="h-6 w-6" />
+                      </span>
+                      <span className="mt-3 text-[16px] font-extralight tracking-[0.01em]">Get expert review</span>
+                    </button>
+                  </div>
+                </div>
+              </section>
             </div>
           ) : (
             <div className="mt-4 rounded-[2px] border border-[#CDCDCD] bg-[#FBFBFB] px-4 py-5">
@@ -602,6 +839,33 @@ export function AnalysisLoadingPage({
       </div>
     </main>
   );
+}
+
+function mergeAnalysisResults(
+  currentResult: AnalysisResultEvent | null,
+  reportResult: AnalysisResultEvent
+): AnalysisResultEvent {
+  if (!currentResult) {
+    return reportResult;
+  }
+
+  return {
+    shareToken: reportResult.shareToken ?? currentResult.shareToken,
+    meanWindSpeed: reportResult.meanWindSpeed ?? currentResult.meanWindSpeed,
+    aepKwh: reportResult.aepKwh ?? currentResult.aepKwh,
+    monthlyProductionKwh: reportResult.monthlyProductionKwh ?? currentResult.monthlyProductionKwh,
+    directionalProductionKwh: reportResult.directionalProductionKwh ?? currentResult.directionalProductionKwh,
+    potentialAepKwh: reportResult.potentialAepKwh ?? currentResult.potentialAepKwh,
+    potentialMonthlyProductionKwh:
+      reportResult.potentialMonthlyProductionKwh ?? currentResult.potentialMonthlyProductionKwh,
+    potentialDirectionalProductionKwh:
+      reportResult.potentialDirectionalProductionKwh ?? currentResult.potentialDirectionalProductionKwh,
+    windRosePercentages: reportResult.windRosePercentages ?? currentResult.windRosePercentages,
+    potentialWindRosePercentages:
+      reportResult.potentialWindRosePercentages ?? currentResult.potentialWindRosePercentages,
+    windResourceScore: reportResult.windResourceScore ?? currentResult.windResourceScore,
+    siteUtilizationScore: reportResult.siteUtilizationScore ?? currentResult.siteUtilizationScore
+  };
 }
 
 function toAnalysisAddress(location: SelectedLocation): string | null {
@@ -620,38 +884,21 @@ function mapProgressToStepLinkWidth(progressPercent: number): number {
   return Math.min(STEP_TWO_TO_THREE_SEGMENT_WIDTH_PCT, (withOffset / 100) * STEP_TWO_TO_THREE_SEGMENT_WIDTH_PCT);
 }
 
-function parsePositiveNumber(value: string): number | null {
-  if (!value.trim()) {
+function resolveApiYearlyProduction(value: number | null | undefined): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
     return null;
   }
 
-  const parsed = Number.parseFloat(value);
-  if (!Number.isFinite(parsed) || parsed < 0) {
+  return value;
+}
+
+function resolveApiMonthlyProduction(monthlyProductionKwh: number[] | null): number[] | null {
+  if (!monthlyProductionKwh || monthlyProductionKwh.length !== 12) {
     return null;
   }
 
-  return parsed;
-}
-
-function resolveRealisticYearlyProduction(value: number | null | undefined): number {
-  if (typeof value === "number" && Number.isFinite(value) && value >= REALISTIC_YEARLY_PRODUCTION_MIN_KWH) {
-    return value;
-  }
-
-  return REALISTIC_YEARLY_PRODUCTION_DEFAULT_KWH;
-}
-
-function resolveMonthlyProfile(monthlyProductionKwh: number[] | null): number[] {
-  if (monthlyProductionKwh && monthlyProductionKwh.length === 12) {
-    const sanitized = monthlyProductionKwh.map((value) => (Number.isFinite(value) && value > 0 ? value : 0));
-    const total = sanitized.reduce((sum, value) => sum + value, 0);
-
-    if (total > 0) {
-      return sanitized.map((value) => value / total);
-    }
-  }
-
-  return DEFAULT_MONTHLY_PROFILE;
+  const sanitized = monthlyProductionKwh.map((value) => (Number.isFinite(value) && value >= 0 ? value : 0));
+  return sanitized;
 }
 
 function normalizeToShares(values: number[]): number[] {
@@ -667,6 +914,206 @@ function normalizeToShares(values: number[]): number[] {
 
 function sanitizePositiveValues(values: number[]): number[] {
   return values.map((value) => (Number.isFinite(value) && value > 0 ? value : 0));
+}
+
+function resolveQualityMarkerPositionsFromScores(
+  windResourceScore: number | null | undefined,
+  siteUtilizationScore: number | null | undefined
+): number[] {
+  if (isFiniteScore(windResourceScore) && isFiniteScore(siteUtilizationScore)) {
+    return [
+      scoreToQualityMarkerTopPx(windResourceScore),
+      scoreToQualityMarkerTopPx(siteUtilizationScore)
+    ];
+  }
+
+  return resolveRandomQualityMarkerPositions(
+    2,
+    QUALITY_MARKER_MIN_TOP_PX,
+    QUALITY_MARKER_MAX_TOP_PX,
+    34
+  );
+}
+
+function scoreToQualityMarkerTopPx(score: number): number {
+  const clampedScore = Math.max(QUALITY_SCORE_MIN, Math.min(QUALITY_SCORE_MAX, score));
+  const scoreRange = QUALITY_SCORE_MAX - QUALITY_SCORE_MIN;
+
+  if (scoreRange <= 0) {
+    return QUALITY_MARKER_MAX_TOP_PX;
+  }
+
+  const normalized = (clampedScore - QUALITY_SCORE_MIN) / scoreRange;
+  const fromTopRatio = 1 - normalized;
+  return QUALITY_MARKER_MIN_TOP_PX + fromTopRatio * (QUALITY_MARKER_MAX_TOP_PX - QUALITY_MARKER_MIN_TOP_PX);
+}
+
+function markerTopPxToClosestQualityTierIndex(markerTopPx: number): number {
+  const clampedTopPx = Math.max(QUALITY_MARKER_MIN_TOP_PX, Math.min(QUALITY_MARKER_MAX_TOP_PX, markerTopPx));
+  const range = QUALITY_MARKER_MAX_TOP_PX - QUALITY_MARKER_MIN_TOP_PX;
+  const maxIndex = QUALITY_TIER_DEFINITIONS.length - 1;
+
+  if (range <= 0 || maxIndex <= 0) {
+    return 0;
+  }
+
+  const normalized = (clampedTopPx - QUALITY_MARKER_MIN_TOP_PX) / range;
+  const nearestIndex = Math.round(normalized * maxIndex);
+  return Math.max(0, Math.min(maxIndex, nearestIndex));
+}
+
+function isFiniteScore(value: number | null | undefined): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+interface QualityCalloutPosition {
+  index: number;
+  markerTopPx: number;
+  centeredTopPx: number;
+  topPx: number;
+  edgeDistancePx: number;
+  isMoved: boolean;
+}
+
+function resolveQualityCalloutPositions(
+  markerPositions: number[]
+): Array<{ index: number; topPx: number; markerTopPx: number; isMoved: boolean }> {
+  const minSeparationPx = QUALITY_CALLOUT_HEIGHT_PX + QUALITY_CALLOUT_VERTICAL_GAP_PX;
+  const basePositions: QualityCalloutPosition[] = markerPositions.map((markerTopPx, index) => {
+    const centeredTopPx = markerTopPx - QUALITY_CALLOUT_HEIGHT_PX / 2;
+    return {
+      index,
+      markerTopPx,
+      centeredTopPx,
+      topPx: centeredTopPx,
+      edgeDistancePx: Math.min(markerTopPx, QUALITY_SCALE_HEIGHT_PX - markerTopPx),
+      isMoved: false
+    };
+  });
+
+  if (basePositions.length < 2 || !hasCalloutOverlap(basePositions, minSeparationPx)) {
+    return basePositions
+      .map(({ index, topPx, markerTopPx }) => ({ index, topPx, markerTopPx, isMoved: false }))
+      .sort((left, right) => left.index - right.index);
+  }
+
+  if (basePositions.length === 2) {
+    const [first, second] = basePositions;
+    const anchor = first.edgeDistancePx <= second.edgeDistancePx ? first : second;
+    const other = anchor.index === first.index ? second : first;
+    const anchorTop = anchor.centeredTopPx;
+    let otherTop = other.topPx;
+    const otherIsBelowAnchor = other.markerTopPx >= anchor.markerTopPx;
+
+    if (otherIsBelowAnchor) {
+      const minTop = anchorTop + minSeparationPx + QUALITY_CALLOUT_DOWNWARD_EXTRA_GAP_PX;
+      if (otherTop < minTop) {
+        otherTop = minTop;
+      }
+    } else {
+      const maxAllowedTop = anchorTop - minSeparationPx;
+      if (otherTop > maxAllowedTop) {
+        otherTop = maxAllowedTop;
+      }
+    }
+
+    return [
+      { index: anchor.index, topPx: anchorTop, markerTopPx: anchor.markerTopPx, isMoved: false },
+      {
+        index: other.index,
+        topPx: otherTop,
+        markerTopPx: other.markerTopPx,
+        isMoved: Math.abs(otherTop - other.centeredTopPx) > 0.01
+      }
+    ].sort((left, right) => left.index - right.index);
+  }
+
+  const spreadPositions = [...basePositions].sort((left, right) => left.topPx - right.topPx);
+  for (let index = 1; index < spreadPositions.length; index += 1) {
+    const previousTop = spreadPositions[index - 1].topPx;
+    const minTop = previousTop + minSeparationPx;
+    spreadPositions[index].topPx = Math.max(spreadPositions[index].topPx, minTop);
+  }
+
+  return spreadPositions
+    .map(({ index, topPx, centeredTopPx, markerTopPx }) => ({
+      index,
+      topPx,
+      markerTopPx,
+      isMoved: Math.abs(topPx - centeredTopPx) > 0.01
+    }))
+    .sort((left, right) => left.index - right.index);
+}
+
+function hasCalloutOverlap(
+  calloutPositions: Array<{ centeredTopPx: number }>,
+  minSeparationPx: number
+): boolean {
+  const sortedPositions = [...calloutPositions].sort((left, right) => left.centeredTopPx - right.centeredTopPx);
+  for (let index = 1; index < sortedPositions.length; index += 1) {
+    if (sortedPositions[index].centeredTopPx - sortedPositions[index - 1].centeredTopPx < minSeparationPx) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function describeQualityConnectorPath({
+  startX,
+  startY,
+  endX,
+  endY,
+  useRoutedPath,
+  bendRadiusPx
+}: {
+  startX: number;
+  startY: number;
+  endX: number;
+  endY: number;
+  useRoutedPath: boolean;
+  bendRadiusPx: number;
+}): string {
+  if (endX <= startX) {
+    return `M ${startX} ${startY} L ${endX} ${startY}`;
+  }
+
+  if (!useRoutedPath || Math.abs(endY - startY) < 0.01) {
+    return `M ${startX} ${startY} L ${endX} ${startY}`;
+  }
+
+  const halfwayX = startX + (endX - startX) / 2;
+  const verticalDirection = endY >= startY ? 1 : -1;
+  const horizontalToHalfPx = halfwayX - startX;
+  const horizontalFromHalfPx = endX - halfwayX;
+  const verticalDistancePx = Math.abs(endY - startY);
+  const radiusPx = Math.max(
+    0,
+    Math.min(
+      bendRadiusPx,
+      horizontalToHalfPx,
+      horizontalFromHalfPx,
+      verticalDistancePx / 2
+    )
+  );
+
+  if (radiusPx < 0.01) {
+    return `M ${startX} ${startY} L ${endX} ${endY}`;
+  }
+
+  const firstCornerStartX = halfwayX - radiusPx;
+  const firstCornerEndY = startY + verticalDirection * radiusPx;
+  const secondCornerStartY = endY - verticalDirection * radiusPx;
+  const secondCornerEndX = halfwayX + radiusPx;
+
+  return [
+    `M ${startX} ${startY}`,
+    `L ${firstCornerStartX} ${startY}`,
+    `Q ${halfwayX} ${startY} ${halfwayX} ${firstCornerEndY}`,
+    `L ${halfwayX} ${secondCornerStartY}`,
+    `Q ${halfwayX} ${endY} ${secondCornerEndX} ${endY}`,
+    `L ${endX} ${endY}`
+  ].join(" ");
 }
 
 function qualityScaleColorAt(topPx: number, scaleHeightPx: number): string {
@@ -718,38 +1165,100 @@ function resolveRandomQualityMarkerPositions(
   return sortedPositions;
 }
 
-interface LegendInfoHintProps {
-  text: string;
+interface LegendTooltipItemProps {
+  label: string;
+  infoText: string;
+  swatchVariant: "solid" | "gradient";
+  tooltipAlign?: "left" | "right";
 }
 
-function LegendInfoHint({ text }: LegendInfoHintProps) {
+function LegendTooltipItem({
+  label,
+  infoText,
+  swatchVariant,
+  tooltipAlign = "right"
+}: LegendTooltipItemProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [isHovered, setIsHovered] = useState(false);
-  const isVisible = isOpen || isHovered;
+  const [isTouchLikeInput, setIsTouchLikeInput] = useState(false);
+  const isVisible = isOpen || (!isTouchLikeInput && isHovered);
+  const tooltipPositionClass = tooltipAlign === "left" ? "left-0" : "right-0";
 
   return (
-    <span
-      className="relative ml-1 inline-flex items-center self-center"
-      onMouseEnter={() => setIsHovered(true)}
-      onMouseLeave={() => setIsHovered(false)}
+    <button
+      type="button"
+      className="relative flex min-h-[30px] items-center rounded-[2px] bg-[#ECECEC] py-1.5 pl-2 pr-1.5 text-[12px] text-[#111111] sm:px-3"
+      onPointerDown={(event) => setIsTouchLikeInput(event.pointerType !== "mouse")}
+      onMouseEnter={() => {
+        if (!isTouchLikeInput) {
+          setIsHovered(true);
+        }
+      }}
+      onMouseLeave={() => {
+        if (!isTouchLikeInput) {
+          setIsHovered(false);
+        }
+      }}
+      onClick={() => {
+        setIsOpen((value) => !value);
+        if (isTouchLikeInput) {
+          setIsHovered(false);
+        }
+      }}
+      onBlur={() => {
+        setIsOpen(false);
+        setIsHovered(false);
+      }}
+      aria-label={`${label}. More info`}
+      aria-expanded={isVisible}
     >
-      <button
-        type="button"
-        aria-label="More info"
-        className="inline-flex h-[18px] w-[18px] items-center justify-center rounded-full text-[#585858]"
-        onClick={() => setIsOpen((value) => !value)}
-        onBlur={() => setIsOpen(false)}
-      >
-        <svg viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true">
+      {swatchVariant === "solid" ? (
+        <span className="h-3.5 w-3.5 shrink-0 self-center rounded-[2px] border border-white bg-white/60" aria-hidden />
+      ) : (
+        <span
+          className="h-3.5 w-[2.68rem] shrink-0 self-center rounded-[2px] bg-[linear-gradient(to_right,#22c55e_0%,#fbbf24_50%,#f87171_100%)] sm:w-28"
+          aria-hidden
+        />
+      )}
+      <span className="ml-1.5 self-center leading-none sm:ml-2">{label}</span>
+      <span className="ml-0.5 inline-flex h-4 w-4 items-center justify-center rounded-full text-[#585858]" aria-hidden>
+        <svg viewBox="0 0 24 24" className="h-3.5 w-3.5">
           <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeWidth="1.8" />
           <circle cx="12" cy="8.2" r="1.1" fill="currentColor" />
           <path d="M12 11v5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
         </svg>
-      </button>
+      </span>
       {isVisible ? (
         <span
           role="tooltip"
-          className="pointer-events-none absolute bottom-full right-0 z-20 mb-1 w-56 rounded-[2px] border border-[#CDCDCD] bg-white px-2 py-1 text-[12px] font-normal leading-tight text-[#2A2A2A] shadow-[0_1px_4px_rgba(0,0,0,0.15)]"
+          className={`pointer-events-none absolute ${tooltipPositionClass} bottom-full z-20 mb-1 w-[min(14rem,calc(100vw-1rem))] rounded-[2px] border border-[#CDCDCD] bg-white px-2 py-1 text-left text-[12px] font-normal leading-tight text-[#2A2A2A] shadow-[0_1px_4px_rgba(0,0,0,0.15)] sm:w-56`}
+        >
+          {infoText}
+        </span>
+      ) : null}
+    </button>
+  );
+}
+
+interface LegendInfoHintProps {
+  text: string;
+  isOpen: boolean;
+}
+
+function LegendInfoHint({ text, isOpen }: LegendInfoHintProps) {
+  return (
+    <span className="relative ml-0.5 inline-flex items-center self-center">
+      <span className="inline-flex h-4 w-4 items-center justify-center rounded-full text-[#585858]" aria-hidden>
+        <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" aria-hidden="true">
+          <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeWidth="1.8" />
+          <circle cx="12" cy="8.2" r="1.1" fill="currentColor" />
+          <path d="M12 11v5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+        </svg>
+      </span>
+      {isOpen ? (
+        <span
+          role="tooltip"
+          className="absolute bottom-full right-0 z-20 mb-1 w-[min(14rem,calc(100vw-1rem))] rounded-[2px] border border-[#CDCDCD] bg-white px-2 py-1 text-[12px] font-normal leading-tight text-[#2A2A2A] shadow-[0_1px_4px_rgba(0,0,0,0.15)] sm:w-56"
         >
           {text}
         </span>
@@ -757,20 +1266,6 @@ function LegendInfoHint({ text }: LegendInfoHintProps) {
     </span>
   );
 }
-
-const DEFAULT_MONTHLY_PROFILE = [
-  0.098,
-  0.094,
-  0.09,
-  0.082,
-  0.075,
-  0.068,
-  0.063,
-  0.064,
-  0.076,
-  0.091,
-  0.1,
-  0.099
-];
-
 const DEFAULT_DIRECTION_STRENGTH = [8, 10, 11, 9, 7, 8, 10, 11, 9, 8, 6, 7];
+
+

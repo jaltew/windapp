@@ -1,4 +1,4 @@
-﻿import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Feature, FeatureCollection, Polygon } from "geojson";
 import maplibregl, {
   type Map as MapLibreMap,
@@ -184,7 +184,7 @@ export function LocationMap({
 
     map.on("zoomend", () => {
       // Temporary debugging aid for validating step 1 zoom behavior.
-      console.log(`[step1-map] zoom=${map.getZoom().toFixed(2)}`);
+      console.log("[step1-map] zoom changed");
     });
 
     return () => {
@@ -283,7 +283,7 @@ export function LocationMap({
       <div className="relative overflow-hidden rounded-t-[2px] rounded-b-none">
         <div
           ref={mapContainerRef}
-          className="h-[max(190px,min(460px,calc(100dvh-250px)))] w-full sm:h-[max(240px,min(520px,calc(100dvh-230px)))] 2xl:h-[min(700px,calc(100dvh-220px))]"
+          className="h-[max(190px,calc(100dvh-212px))] w-full sm:h-[max(240px,min(520px,calc(100dvh-230px)))] 2xl:h-[min(700px,calc(100dvh-220px))]"
           aria-label="Interactive location map"
         />
 
@@ -306,10 +306,18 @@ export function LocationMap({
             <button
               type="button"
               aria-label="Close placement information"
-              className="absolute right-3 top-2 text-[24px] leading-none text-[#525252]"
+              className="absolute right-3 top-2 inline-flex h-7 w-7 items-center justify-center text-[#525252]"
               onClick={() => setShowPlacementHint(false)}
             >
-              ×
+              <svg viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true">
+                <path
+                  d="M6 6l12 12M18 6L6 18"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                />
+              </svg>
             </button>
             <p className="text-[16px] font-semibold text-[#525252]">Placement</p>
             <p className="mt-2 text-[14px] font-medium leading-[1.35] text-[#525252]">
@@ -509,3 +517,4 @@ function destinationPoint(
     longitude: wrappedLongitude
   };
 }
+

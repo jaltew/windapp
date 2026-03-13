@@ -12,13 +12,34 @@ import type {
   StartAnalysisRequest
 } from "../../../types/analysis";
 import type { FeatureCollection, Geometry } from "geojson";
+import { buildPublicWizardUrl } from "./publicWizardApi";
 
-const DEFAULT_API_BASE_URL = "/api/public-wizard";
 const ONE_SHOT_STREAM_PATH = "/one-shot/stream";
 
 interface OneShotAnalysisStreamOptions {
   signal?: AbortSignal;
   onEvent?: (event: AnalysisStreamEvent) => void;
+}
+
+interface ParsedWindRosePayload {
+  siteAepBySector: number[] | null;
+  localWindPotentialAepBySector: number[] | null;
+  frequencyPercentages: number[] | null;
+  meanSpeedLocal: number | null;
+}
+
+interface ParsedSpeedDistributionPayload {
+  localWindPotentialAep: number | null;
+  siteAepBySector: number[] | null;
+  localWindPotentialAepBySector: number[] | null;
+  frequencyPercentages: number[] | null;
+}
+
+interface ParsedSectorData {
+  index: number | null;
+  frequency: number | null;
+  siteAepEstimate: number | null;
+  localWindPotentialAep: number | null;
 }
 
 export async function streamOneShotAnalysis(
@@ -70,10 +91,7 @@ export async function streamOneShotAnalysis(
 }
 
 function getOneShotStreamUrl(): string {
-  const configuredBaseUrl = import.meta.env.VITE_WIND_API_BASE_URL as string | undefined;
-  const baseUrl = configuredBaseUrl?.trim() || DEFAULT_API_BASE_URL;
-  const normalizedBaseUrl = baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
-  return `${normalizedBaseUrl}${ONE_SHOT_STREAM_PATH}`;
+  return buildPublicWizardUrl(ONE_SHOT_STREAM_PATH);
 }
 
 async function readSseStream(
@@ -165,7 +183,7 @@ function parseAnalysisEvent(eventName: string, rawData: string): AnalysisStreamE
     case "obstacles":
       return { type: "obstacles", data: parseObstaclesEvent(parsed) };
     case "result":
-      return { type: "result", data: parseResultEvent(parsed) };
+      return { type: "result", data: parseAnalysisResultPayload(parsed) };
     case "error":
       return { type: "error", data: parseErrorEvent(parsed) };
     default:
@@ -234,77 +252,116 @@ function parseObstaclesEvent(payload: Record<string, unknown>): AnalysisObstacle
   };
 }
 
-function parseResultEvent(payload: Record<string, unknown>): AnalysisResultEvent {
+export function parseAnalysisResultPayload(payload: unknown): AnalysisResultEvent {
+  const record = isRecord(payload) ? payload : {};
+  const windRose =
+    parseWindRosePayload(readRecordField(record, "windRose"))
+    ?? parseWindRosePayload(readRecordField(record, "wind_rose"));
+  const speedDistribution =
+    parseSpeedDistributionPayload(readRecordField(record, "speedDistribution"))
+    ?? parseSpeedDistributionPayload(readRecordField(record, "speed_distribution"));
+
   const monthlyProductionKwh =
-    readNumberArrayField(payload, "monthlyProductionKwh")
-    ?? readNumberArrayField(payload, "monthly_production_kwh")
-    ?? readNumberArrayField(payload, "monthlyProduction")
-    ?? readNumberArrayField(payload, "monthly_production")
-    ?? readNumberArrayField(payload, "monthlyKwh")
-    ?? readNumberArrayField(payload, "monthly_kwh");
+    readNumberArrayField(record, "monthlyProductionKwh")
+    ?? readNumberArrayField(record, "monthly_production_kwh")
+    ?? readNumberArrayField(record, "monthlyProduction")
+    ?? readNumberArrayField(record, "monthly_production")
+    ?? readNumberArrayField(record, "monthlyKwh")
+    ?? readNumberArrayField(record, "monthly_kwh")
+    ?? parseMonthlyProductionEntries(record.monthlyProduction)
+    ?? parseMonthlyProductionEntries(record.monthly_production);
 
   const directionalProductionKwh =
-    readNumberArrayField(payload, "directionalProductionKwh")
-    ?? readNumberArrayField(payload, "directional_production_kwh")
-    ?? readNumberArrayField(payload, "productionByDirectionKwh")
-    ?? readNumberArrayField(payload, "production_by_direction_kwh")
-    ?? readNumberArrayField(payload, "directionalAepKwh")
-    ?? readNumberArrayField(payload, "directional_aep_kwh");
+    readNumberArrayField(record, "directionalProductionKwh")
+    ?? readNumberArrayField(record, "directional_production_kwh")
+    ?? readNumberArrayField(record, "productionByDirectionKwh")
+    ?? readNumberArrayField(record, "production_by_direction_kwh")
+    ?? readNumberArrayField(record, "directionalAepKwh")
+    ?? readNumberArrayField(record, "directional_aep_kwh")
+    ?? windRose?.siteAepBySector
+    ?? speedDistribution?.siteAepBySector
+    ?? null;
 
   const potentialMonthlyProductionKwh =
-    readNumberArrayField(payload, "potentialMonthlyProductionKwh")
-    ?? readNumberArrayField(payload, "potential_monthly_production_kwh")
-    ?? readNumberArrayField(payload, "potentialMonthlyProduction")
-    ?? readNumberArrayField(payload, "potential_monthly_production")
-    ?? readNumberArrayField(payload, "grossMonthlyProductionKwh")
-    ?? readNumberArrayField(payload, "gross_monthly_production_kwh")
-    ?? readNumberArrayField(payload, "noObstacleMonthlyProductionKwh")
-    ?? readNumberArrayField(payload, "no_obstacle_monthly_production_kwh");
+    readNumberArrayField(record, "potentialMonthlyProductionKwh")
+    ?? readNumberArrayField(record, "potential_monthly_production_kwh")
+    ?? readNumberArrayField(record, "potentialMonthlyProduction")
+    ?? readNumberArrayField(record, "potential_monthly_production")
+    ?? readNumberArrayField(record, "grossMonthlyProductionKwh")
+    ?? readNumberArrayField(record, "gross_monthly_production_kwh")
+    ?? readNumberArrayField(record, "noObstacleMonthlyProductionKwh")
+    ?? readNumberArrayField(record, "no_obstacle_monthly_production_kwh");
 
   const potentialDirectionalProductionKwh =
-    readNumberArrayField(payload, "potentialDirectionalProductionKwh")
-    ?? readNumberArrayField(payload, "potential_directional_production_kwh")
-    ?? readNumberArrayField(payload, "obstacleAdjustedPotentialDirectionalKwh")
-    ?? readNumberArrayField(payload, "obstacle_adjusted_potential_directional_kwh")
-    ?? readNumberArrayField(payload, "potentialByDirectionKwh")
-    ?? readNumberArrayField(payload, "potential_by_direction_kwh")
-    ?? readNumberArrayField(payload, "grossDirectionalProductionKwh")
-    ?? readNumberArrayField(payload, "gross_directional_production_kwh");
+    readNumberArrayField(record, "potentialDirectionalProductionKwh")
+    ?? readNumberArrayField(record, "potential_directional_production_kwh")
+    ?? readNumberArrayField(record, "obstacleAdjustedPotentialDirectionalKwh")
+    ?? readNumberArrayField(record, "obstacle_adjusted_potential_directional_kwh")
+    ?? readNumberArrayField(record, "potentialByDirectionKwh")
+    ?? readNumberArrayField(record, "potential_by_direction_kwh")
+    ?? readNumberArrayField(record, "grossDirectionalProductionKwh")
+    ?? readNumberArrayField(record, "gross_directional_production_kwh")
+    ?? windRose?.localWindPotentialAepBySector
+    ?? speedDistribution?.localWindPotentialAepBySector
+    ?? null;
+
+  const windRosePercentages =
+    readNumberArrayField(record, "windRosePercentages")
+    ?? readNumberArrayField(record, "wind_rose_percentages")
+    ?? readNumberArrayField(record, "windRose")
+    ?? readNumberArrayField(record, "wind_rose")
+    ?? readNumberArrayField(record, "directionFrequency")
+    ?? readNumberArrayField(record, "direction_frequency")
+    ?? windRose?.frequencyPercentages
+    ?? speedDistribution?.frequencyPercentages
+    ?? null;
+
+  const potentialWindRosePercentages =
+    readNumberArrayField(record, "potentialWindRosePercentages")
+    ?? readNumberArrayField(record, "potential_wind_rose_percentages")
+    ?? readNumberArrayField(record, "obstacleAdjustedPotentialWindRosePercentages")
+    ?? readNumberArrayField(record, "obstacle_adjusted_potential_wind_rose_percentages")
+    ?? readNumberArrayField(record, "potentialDirectionFrequency")
+    ?? readNumberArrayField(record, "potential_direction_frequency")
+    ?? windRosePercentages;
 
   return {
-    shareToken: readStringField(payload, "shareToken") ?? readStringField(payload, "share_token"),
-    meanWindSpeed: readNumberField(payload, "meanWindSpeed"),
-    aepKwh: readNumberField(payload, "aepKwh"),
+    shareToken: readStringField(record, "shareToken") ?? readStringField(record, "share_token"),
+    meanWindSpeed:
+      readNumberField(record, "meanWindSpeed")
+      ?? readNumberField(record, "mean_speed")
+      ?? windRose?.meanSpeedLocal
+      ?? null,
+    aepKwh: readNumberField(record, "aepKwh") ?? readNumberField(record, "aep_kwh"),
     monthlyProductionKwh,
     directionalProductionKwh,
     potentialAepKwh:
-      readNumberField(payload, "potentialAepKwh")
-      ?? readNumberField(payload, "potential_aep_kwh")
-      ?? readNumberField(payload, "obstacleAdjustedPotentialAepKwh")
-      ?? readNumberField(payload, "obstacle_adjusted_potential_aep_kwh")
-      ?? readNumberField(payload, "grossAepKwh")
-      ?? readNumberField(payload, "gross_aep_kwh")
-      ?? readNumberField(payload, "noObstacleAepKwh")
-      ?? readNumberField(payload, "no_obstacle_aep_kwh"),
+      readNumberField(record, "potentialAepKwh")
+      ?? readNumberField(record, "potential_aep_kwh")
+      ?? readNumberField(record, "obstacleAdjustedPotentialAepKwh")
+      ?? readNumberField(record, "obstacle_adjusted_potential_aep_kwh")
+      ?? readNumberField(record, "grossAepKwh")
+      ?? readNumberField(record, "gross_aep_kwh")
+      ?? readNumberField(record, "noObstacleAepKwh")
+      ?? readNumberField(record, "no_obstacle_aep_kwh")
+      ?? readNumberField(record, "localWindPotentialAep")
+      ?? readNumberField(record, "local_wind_potential_aep")
+      ?? speedDistribution?.localWindPotentialAep
+      ?? null,
     potentialMonthlyProductionKwh,
     potentialDirectionalProductionKwh,
-    windRosePercentages:
-      readNumberArrayField(payload, "windRosePercentages")
-      ?? readNumberArrayField(payload, "wind_rose_percentages")
-      ?? readNumberArrayField(payload, "windRose")
-      ?? readNumberArrayField(payload, "wind_rose")
-      ?? readNumberArrayField(payload, "directionFrequency")
-      ?? readNumberArrayField(payload, "direction_frequency"),
-    potentialWindRosePercentages:
-      readNumberArrayField(payload, "potentialWindRosePercentages")
-      ?? readNumberArrayField(payload, "potential_wind_rose_percentages")
-      ?? readNumberArrayField(payload, "obstacleAdjustedPotentialWindRosePercentages")
-      ?? readNumberArrayField(payload, "obstacle_adjusted_potential_wind_rose_percentages")
-      ?? readNumberArrayField(payload, "potentialDirectionFrequency")
-      ?? readNumberArrayField(payload, "potential_direction_frequency"),
-    windResourceScore: readNumberField(payload, "windResourceScore"),
-    siteUtilizationScore: readNumberField(payload, "siteUtilizationScore")
-      ?? readNumberField(payload, "site_utilization_score")
+    windRosePercentages,
+    potentialWindRosePercentages,
+    windResourceScore:
+      readNumberField(record, "windResourceScore")
+      ?? readNumberField(record, "wind_resource_score")
+      ?? readNumberField(record, "localWindPotentialScore")
+      ?? readNumberField(record, "local_wind_potential_score"),
+    siteUtilizationScore:
+      readNumberField(record, "siteUtilizationScore")
+      ?? readNumberField(record, "site_utilization_score")
+      ?? readNumberField(record, "siteWindUtilizationScore")
+      ?? readNumberField(record, "site_wind_utilization_score")
   };
 }
 
@@ -359,6 +416,149 @@ function readNumberArrayField(payload: Record<string, unknown>, key: string): nu
   return parsed.length > 0 ? parsed : null;
 }
 
+function parseMonthlyProductionEntries(value: unknown): number[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+
+  const parsed = value
+    .map((entry, index) => {
+      if (!isRecord(entry)) {
+        return null;
+      }
+
+      const siteKwh = readNumberField(entry, "siteKwh") ?? readNumberField(entry, "site_kwh");
+      if (siteKwh === null) {
+        return null;
+      }
+
+      return {
+        order: index,
+        month: readNumberField(entry, "month"),
+        siteKwh
+      };
+    })
+    .filter((entry): entry is { order: number; month: number | null; siteKwh: number } => entry !== null);
+
+  if (parsed.length === 0) {
+    return null;
+  }
+
+  const shouldSortByMonth = parsed.every((entry) => typeof entry.month === "number");
+  if (shouldSortByMonth) {
+    parsed.sort((left, right) => {
+      const leftMonth = left.month ?? 0;
+      const rightMonth = right.month ?? 0;
+      return leftMonth - rightMonth;
+    });
+  } else {
+    parsed.sort((left, right) => left.order - right.order);
+  }
+
+  return parsed.map((entry) => entry.siteKwh);
+}
+
+function readRecordField(payload: Record<string, unknown>, key: string): Record<string, unknown> | null {
+  const value = payload[key];
+  return isRecord(value) ? value : null;
+}
+
+function parseWindRosePayload(value: Record<string, unknown> | null): ParsedWindRosePayload | null {
+  if (!value) {
+    return null;
+  }
+
+  const sectors = parseSectorDataArray(value.sectors);
+
+  return {
+    siteAepBySector: toNumberArrayOrNull(sectors.map((sector) => sector.siteAepEstimate)),
+    localWindPotentialAepBySector: toNumberArrayOrNull(sectors.map((sector) => sector.localWindPotentialAep)),
+    frequencyPercentages: toNumberArrayOrNull(sectors.map((sector) => sector.frequency)),
+    meanSpeedLocal:
+      readNumberField(value, "meanSpeedLocal")
+      ?? readNumberField(value, "mean_speed_local")
+      ?? readNumberField(value, "meanWindSpeed")
+  };
+}
+
+function parseSpeedDistributionPayload(value: Record<string, unknown> | null): ParsedSpeedDistributionPayload | null {
+  if (!value) {
+    return null;
+  }
+
+  const energy = readRecordField(value, "energy");
+  if (!energy) {
+    return null;
+  }
+
+  const sectors = parseSectorDataArray(energy.sectors);
+
+  return {
+    localWindPotentialAep:
+      readNumberField(energy, "localWindPotentialAep")
+      ?? readNumberField(energy, "local_wind_potential_aep"),
+    siteAepBySector: toNumberArrayOrNull(sectors.map((sector) => sector.siteAepEstimate)),
+    localWindPotentialAepBySector: toNumberArrayOrNull(sectors.map((sector) => sector.localWindPotentialAep)),
+    frequencyPercentages: toNumberArrayOrNull(sectors.map((sector) => sector.frequency))
+  };
+}
+
+function parseSectorDataArray(value: unknown): ParsedSectorData[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const sectors = value
+    .map((entry, order) => {
+      if (!isRecord(entry)) {
+        return null;
+      }
+
+      const index = readNumberField(entry, "index");
+
+      return {
+        order,
+        sector: {
+          index,
+          frequency: readNumberField(entry, "frequency"),
+          siteAepEstimate:
+            readNumberField(entry, "siteAepEstimate")
+            ?? readNumberField(entry, "site_aep_estimate")
+            ?? readNumberField(entry, "siteKwh")
+            ?? readNumberField(entry, "site_kwh"),
+          localWindPotentialAep:
+            readNumberField(entry, "localWindPotentialAep")
+            ?? readNumberField(entry, "local_wind_potential_aep")
+            ?? readNumberField(entry, "potentialAep")
+            ?? readNumberField(entry, "potential_aep")
+        }
+      };
+    })
+    .filter((entry): entry is { order: number; sector: ParsedSectorData } => entry !== null);
+
+  const allHaveIndex = sectors.every((entry) => typeof entry.sector.index === "number");
+  sectors.sort((left, right) => {
+    if (allHaveIndex) {
+      const leftIndex = left.sector.index ?? 0;
+      const rightIndex = right.sector.index ?? 0;
+      return leftIndex - rightIndex;
+    }
+
+    return left.order - right.order;
+  });
+
+  return sectors.map((entry) => entry.sector);
+}
+
+function toNumberArrayOrNull(values: Array<number | null>): number[] | null {
+  if (values.length === 0) {
+    return null;
+  }
+
+  const numbers = values.filter((value): value is number => typeof value === "number");
+  return numbers.length > 0 ? numbers : null;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -409,3 +609,4 @@ function normalizeLandcoverImage(value: string | null): string | null {
 
   return `data:image/png;base64,${value}`;
 }
+

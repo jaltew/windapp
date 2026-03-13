@@ -6,6 +6,40 @@ export interface StartAnalysisRequest {
   address?: string | null;
 }
 
+export interface SaveAnalysisEmailRequest {
+  email: string;
+}
+
+export interface SaveAnalysisEmailResponse {
+  success: boolean;
+}
+
+export interface AnalysisMonthlyProductionEntry {
+  month: number | null;
+  label: string | null;
+  siteKwh: number | null;
+}
+
+export interface AnalysisReportResponse {
+  shareToken: string;
+  address: string | null;
+  centerLat: number | null;
+  centerLon: number | null;
+  hubHeight: number | null;
+  numSectors: number | null;
+  status: string | null;
+  meanWindSpeed: number | null;
+  aepKwh: number | null;
+  localWindPotentialScore: number | null;
+  siteWindUtilizationScore: number | null;
+  monthlyProduction: AnalysisMonthlyProductionEntry[] | null;
+  buildingCount: number | null;
+  treeCount: number | null;
+  createdAt: string | null;
+  windRose: unknown;
+  speedDistribution: unknown;
+}
+
 export interface AnalysisTokenEvent {
   shareToken: string;
   analysisId: number | null;

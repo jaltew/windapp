@@ -105,9 +105,9 @@ export function LandingLocationPage({
   }, [initialLocation, setQuery]);
 
   return (
-    <main className="min-h-screen">
-      <div className="mx-auto max-w-6xl px-5 pb-6 pt-2 sm:px-8 sm:pb-10 lg:pb-12 lg:pt-4">
-        <section className="mx-auto -mt-1 mb-3 max-w-[460px] sm:mb-4">
+    <main className="min-h-[100dvh] bg-[linear-gradient(to_bottom,#f2f2f2_0,#f2f2f2_114px,#ffffff_114px,#ffffff_100%)] sm:min-h-screen sm:bg-transparent">
+      <div className="mx-auto max-w-6xl pb-0 pt-3 sm:px-8 sm:pb-10 lg:pb-12 lg:pt-4">
+        <section className="mx-auto mb-3 max-w-[460px] px-3 sm:mb-4 sm:px-0">
           <div className="relative">
             <div className="pointer-events-none absolute left-[20%] right-[20%] top-[11px] h-px bg-[#EAEAEA]" />
             {canResumeFromHere ? (
@@ -158,7 +158,7 @@ export function LandingLocationPage({
           </div>
         </section>
 
-        <section className="mx-auto -mx-5 max-w-none border-y border-x-0 border-[#CDCDCD] bg-white p-2.5 shadow-[0_1px_9px_4px_rgba(181,181,181,0.1804)] sm:mx-auto sm:max-w-[700px] sm:rounded-[2px] sm:border sm:p-4">
+        <section className="mx-auto max-w-none border-y border-x-0 border-[#CDCDCD] bg-white p-0 shadow-none sm:mx-auto sm:max-w-[700px] sm:rounded-[2px] sm:border sm:border-[#CDCDCD] sm:p-4 sm:shadow-[0_1px_9px_4px_rgba(181,181,181,0.1804)]">
           <div className="space-y-3 sm:space-y-4">
             <LocationMap
               selectedLocation={selectedLocation}
@@ -168,7 +168,7 @@ export function LandingLocationPage({
               onViewStateChange={onMapViewChange}
             />
 
-            <section className="grid gap-2.5 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end sm:gap-3">
+            <section className="grid gap-2.5 px-3 pb-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end sm:gap-3 sm:px-0 sm:pb-0">
               <LocationSearch
                 query={query}
                 status={status}
@@ -229,3 +229,5 @@ function parseCoordinates(rawValue: string): Coordinates | null {
 function areSameLocationPoint(a: SelectedLocation, b: SelectedLocation): boolean {
   return Math.abs(a.latitude - b.latitude) < 0.000001 && Math.abs(a.longitude - b.longitude) < 0.000001;
 }
+
+

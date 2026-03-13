@@ -33,10 +33,17 @@ const DEFAULT_BASMAP_STYLE: StyleSpecification = {
 };
 
 const FALLBACK_ZOOM = 16;
+const STEP_THREE_DEFAULT_ZOOM = 16;
+const STEP_THREE_MIN_ZOOM = 12.49;
+const STEP_THREE_MAX_ZOOM = 17.8;
+const STEP_THREE_ZOOM_STEP = 0.9;
 const ZOOM_OUT_DELTA = 1.33;
 const ZOOM_OUT_DURATION_MS = 60_000;
 const STEP_THREE_ZOOM_IN_DURATION_MS = 1_500;
 const STEP_THREE_LAYER_FADE_DURATION_MS = 1_000;
+const STEP_THREE_CONTROL_ZOOM_DURATION_MS = 260;
+const MAPLIBRE_DEFAULT_MIN_ZOOM = 0;
+const MAPLIBRE_DEFAULT_MAX_ZOOM = 22;
 const MAP_READY_VIDEO_FALLBACK_MS = 2500;
 const TURBINE_MARKER_DIAMETER_METERS = 15;
 const EARTH_RADIUS_METERS = 6_371_008.8;
@@ -129,13 +136,12 @@ export function AnalysisLiveMap({
       attributionControl: {}
     });
 
-    map.scrollZoom.disable();
     map.boxZoom.disable();
     map.dragPan.disable();
     map.keyboard.disable();
-    map.doubleClickZoom.disable();
-    map.touchZoomRotate.disable();
     map.dragRotate.disable();
+    map.touchZoomRotate.disableRotation();
+    map.touchPitch.disable();
     mapRef.current = map;
 
     map.on("load", () => {
@@ -277,8 +283,15 @@ export function AnalysisLiveMap({
     });
 
     map.on("zoom", () => {
+      lockCenterToSelectedLocation(map, selectedLocationRef.current);
       resizeTurbineMarker(turbineMarkerRef.current, map, selectedLocationRef.current);
       onViewStateChangeRef.current?.(readViewState(map));
+    });
+
+    map.on("zoomend", () => {
+      lockCenterToSelectedLocation(map, selectedLocationRef.current);
+      onViewStateChangeRef.current?.(readViewState(map));
+      console.log("[step3-map] zoom changed");
     });
 
     return () => {
@@ -333,7 +346,7 @@ export function AnalysisLiveMap({
     cancelLayerFadeRef.current = null;
 
     map.stop();
-    const startingZoom = initialViewStateRef.current?.zoom ?? map.getZoom();
+    const startingZoom = map.getZoom();
     const zoomOutTarget = Math.max(0, startingZoom - ZOOM_OUT_DELTA);
 
     map.easeTo({
@@ -376,14 +389,58 @@ export function AnalysisLiveMap({
     cancelLayerFadeRef.current = null;
     map.stop();
 
-    const targetZoom = initialViewStateRef.current?.zoom ?? map.getZoom();
-    map.easeTo({
-      zoom: targetZoom,
-      duration: STEP_THREE_ZOOM_IN_DURATION_MS,
-      essential: true
-    });
+    easeToStepThreeDefaultView(map, selectedLocationRef.current, STEP_THREE_ZOOM_IN_DURATION_MS);
 
     cancelLayerFadeRef.current = fadeOutAnalysisLayers(map, STEP_THREE_LAYER_FADE_DURATION_MS);
+  }, [mapStatus, phase]);
+
+  useEffect(() => {
+    if (phase !== "results") {
+      startedResultsTransitionRef.current = false;
+    }
+  }, [phase]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+
+    if (!map || mapStatus !== "ready") {
+      return;
+    }
+
+    if (phase === "results") {
+      map.setMinZoom(STEP_THREE_MIN_ZOOM);
+      map.setMaxZoom(STEP_THREE_MAX_ZOOM);
+
+      const clampedZoom = Math.min(STEP_THREE_MAX_ZOOM, Math.max(STEP_THREE_MIN_ZOOM, map.getZoom()));
+      if (Math.abs(clampedZoom - map.getZoom()) > 1e-6) {
+        map.setZoom(clampedZoom);
+      }
+      return;
+    }
+
+    map.setMinZoom(MAPLIBRE_DEFAULT_MIN_ZOOM);
+    map.setMaxZoom(MAPLIBRE_DEFAULT_MAX_ZOOM);
+  }, [mapStatus, phase]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+
+    if (!map || mapStatus !== "ready") {
+      return;
+    }
+
+    if (phase === "results") {
+      // Step 3 should only zoom through explicit UI controls.
+      map.scrollZoom.disable();
+      map.doubleClickZoom.disable();
+      map.touchZoomRotate.disable();
+      return;
+    }
+
+    map.scrollZoom.enable();
+    map.doubleClickZoom.enable();
+    map.touchZoomRotate.enable();
+    map.touchZoomRotate.disableRotation();
   }, [mapStatus, phase]);
 
   useEffect(() => {
@@ -428,16 +485,73 @@ export function AnalysisLiveMap({
     upsertLandcoverLayer(map, landcoverPreview);
   }, [landcoverPreview, mapStatus]);
 
+  const handleZoomIn = () => {
+    const map = mapRef.current;
+
+    if (!map || mapStatus !== "ready" || phase !== "results") {
+      return;
+    }
+
+    map.stop();
+    map.easeTo({
+      center: [selectedLocationRef.current.longitude, selectedLocationRef.current.latitude],
+      zoom: Math.min(STEP_THREE_MAX_ZOOM, map.getZoom() + STEP_THREE_ZOOM_STEP),
+      duration: STEP_THREE_CONTROL_ZOOM_DURATION_MS,
+      essential: true
+    });
+  };
+
+  const handleZoomOut = () => {
+    const map = mapRef.current;
+
+    if (!map || mapStatus !== "ready" || phase !== "results") {
+      return;
+    }
+
+    map.stop();
+    map.easeTo({
+      center: [selectedLocationRef.current.longitude, selectedLocationRef.current.latitude],
+      zoom: Math.max(STEP_THREE_MIN_ZOOM, map.getZoom() - STEP_THREE_ZOOM_STEP),
+      duration: STEP_THREE_CONTROL_ZOOM_DURATION_MS,
+      essential: true
+    });
+  };
+
   return (
     <section>
       <div className="relative overflow-hidden rounded-[2px]">
         <div
           ref={mapContainerRef}
-          className="h-[max(190px,min(460px,calc(100dvh-250px)))] w-full sm:h-[max(240px,min(520px,calc(100dvh-230px)))] 2xl:h-[min(700px,calc(100dvh-220px))]"
+          className={`${phase === "results" ? "h-[max(190px,min(460px,calc(100dvh-250px)))]" : "h-[max(190px,calc(100dvh-150px))]"} w-full sm:h-[max(240px,min(520px,calc(100dvh-230px)))] 2xl:h-[min(700px,calc(100dvh-220px))]`}
           aria-label="Live analysis map"
         />
         {phase === "results" && windRoseActualValues ? (
           <WindRoseMapOverlay actualValues={windRoseActualValues} potentialValues={windRosePotentialValues} />
+        ) : null}
+        {phase === "results" && mapStatus === "ready" ? (
+          <div className="absolute left-2.5 top-2.5 z-30 overflow-hidden rounded-[2px] border border-black/15 bg-white shadow-[0_1px_5px_rgba(0,0,0,0.22)]">
+            <button
+              type="button"
+              aria-label="Zoom in"
+              className="flex h-8 w-8 items-center justify-center text-[#303030] transition-colors hover:bg-[#F3F3F3] focus-visible:bg-[#F3F3F3] focus-visible:outline-none"
+              onClick={handleZoomIn}
+            >
+              <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" aria-hidden="true">
+                <path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+              </svg>
+            </button>
+            <div className="h-px w-8 bg-[#E6E6E6]" aria-hidden />
+            <button
+              type="button"
+              aria-label="Zoom out"
+              className="flex h-8 w-8 items-center justify-center text-[#303030] transition-colors hover:bg-[#F3F3F3] focus-visible:bg-[#F3F3F3] focus-visible:outline-none"
+              onClick={handleZoomOut}
+            >
+              <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" aria-hidden="true">
+                <path d="M5 12h14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+              </svg>
+            </button>
+          </div>
         ) : null}
 
         {mapStatus === "error" ? (
@@ -744,6 +858,18 @@ function fadeOutAnalysisLayers(map: MapLibreMap, durationMs: number): () => void
   };
 }
 
+function lockCenterToSelectedLocation(map: MapLibreMap, selectedLocation: SelectedLocation): void {
+  const center = map.getCenter();
+  const latitudeDiff = Math.abs(center.lat - selectedLocation.latitude);
+  const longitudeDiff = Math.abs(center.lng - selectedLocation.longitude);
+
+  if (latitudeDiff < 1e-8 && longitudeDiff < 1e-8) {
+    return;
+  }
+
+  map.setCenter([selectedLocation.longitude, selectedLocation.latitude]);
+}
+
 function readViewState(map: MapLibreMap): MapViewState {
   const center = map.getCenter();
 
@@ -755,3 +881,19 @@ function readViewState(map: MapLibreMap): MapViewState {
     pitch: map.getPitch()
   };
 }
+
+function easeToStepThreeDefaultView(
+  map: MapLibreMap,
+  selectedLocation: SelectedLocation,
+  duration: number
+): void {
+  map.easeTo({
+    center: [selectedLocation.longitude, selectedLocation.latitude],
+    zoom: STEP_THREE_DEFAULT_ZOOM,
+    bearing: 0,
+    pitch: 0,
+    duration,
+    essential: true
+  });
+}
+
