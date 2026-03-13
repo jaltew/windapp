@@ -105,7 +105,7 @@ export function LandingLocationPage({
   }, [initialLocation, setQuery]);
 
   return (
-    <main className="min-h-[100dvh] bg-[linear-gradient(to_bottom,#f2f2f2_0,#f2f2f2_114px,#ffffff_114px,#ffffff_100%)] sm:min-h-screen sm:bg-transparent">
+    <main className="min-h-[100dvh] bg-[linear-gradient(to_bottom,#f2f2f2_0,#f2f2f2_114px,#ffffff_114px,#ffffff_100%)] sm:min-h-screen sm:bg-none sm:bg-[#f2f2f2]">
       <div className="mx-auto max-w-6xl pb-0 pt-3 sm:px-8 sm:pb-10 lg:pb-12 lg:pt-4">
         <section className="mx-auto mb-3 max-w-[460px] px-3 sm:mb-4 sm:px-0">
           <div className="relative">
