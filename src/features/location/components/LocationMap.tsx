@@ -326,7 +326,7 @@ export function LocationMap({
       <div className="relative overflow-hidden rounded-t-[2px] rounded-b-none">
         <div
           ref={mapContainerRef}
-          className="h-[max(190px,calc(100dvh-212px))] w-full sm:h-[max(240px,min(520px,calc(100dvh-230px)))] 2xl:h-[min(700px,calc(100dvh-220px))]"
+          className="h-[max(190px,calc(100dvh-150px))] w-full sm:h-[max(240px,min(520px,calc(100dvh-230px)))] 2xl:h-[min(700px,calc(100dvh-220px))]"
           aria-label="Interactive location map"
         />
 

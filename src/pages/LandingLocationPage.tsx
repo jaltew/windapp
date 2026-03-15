@@ -30,6 +30,8 @@ export function LandingLocationPage({
   const { query, status, suggestions, errorMessage, setQuery } = useMockLocationSearch();
   const [selectedLocation, setSelectedLocation] = useState<SelectedLocation | null>(initialLocation);
   const [focusLocation, setFocusLocation] = useState<SelectedLocation | null>(initialLocation);
+  const [isLocationInputFocused, setIsLocationInputFocused] = useState(false);
+  const isMobileTypingLocation = isLocationInputFocused || (query.trim().length > 0 && selectedLocation?.source !== "map");
 
   const canAnalyze = useMemo(
     () => selectedLocation !== null && !isStartingAnalysis,
@@ -158,7 +160,7 @@ export function LandingLocationPage({
           </div>
         </section>
 
-        <section className="mx-auto max-w-none border-y border-x-0 border-[#CDCDCD] bg-white p-0 shadow-none sm:mx-auto sm:max-w-[700px] sm:rounded-[2px] sm:border sm:border-[#CDCDCD] sm:p-4 sm:shadow-[0_1px_9px_4px_rgba(181,181,181,0.1804)]">
+        <section className="mx-auto max-w-none border-t border-x-0 border-[#CDCDCD] bg-white p-0 shadow-none sm:mx-auto sm:max-w-[700px] sm:rounded-[2px] sm:border sm:border-[#CDCDCD] sm:p-4 sm:shadow-[0_1px_9px_4px_rgba(181,181,181,0.1804)]">
           <div className="space-y-3 sm:space-y-4">
             <LocationMap
               selectedLocation={selectedLocation}
@@ -168,7 +170,11 @@ export function LandingLocationPage({
               onViewStateChange={onMapViewChange}
             />
 
-            <section className="grid gap-2.5 px-3 pb-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end sm:gap-3 sm:px-0 sm:pb-0">
+            <section
+              className={`grid items-end gap-2.5 px-3 pb-4 transition-[grid-template-columns] duration-200 ease-out motion-reduce:transition-none sm:grid-cols-[minmax(0,1fr)_auto] sm:gap-3 sm:px-0 sm:pb-0 ${
+                isMobileTypingLocation ? "grid-cols-[minmax(0,1fr)_96px]" : "grid-cols-[minmax(0,1fr)_auto]"
+              }`}
+            >
               <LocationSearch
                 query={query}
                 status={status}
@@ -177,16 +183,24 @@ export function LandingLocationPage({
                 onQueryChange={setQuery}
                 onSelectSuggestion={selectFromSearch}
                 onSubmitRawQuery={submitRawLocationInput}
+                onInputFocusChange={setIsLocationInputFocused}
               />
 
-              <div>
+              <div className={`shrink-0 transition-[width] duration-200 ease-out motion-reduce:transition-none ${isMobileTypingLocation ? "w-[96px] sm:w-auto" : ""}`}>
                 <button
                   type="button"
                   disabled={!canAnalyze}
-                  className="inline-flex h-14 w-full items-center justify-center rounded-[2px] bg-[#333131] px-5 text-[1em] font-medium text-white transition disabled:cursor-not-allowed disabled:bg-[#ECECEC] disabled:text-[#CDCDCD] sm:w-auto"
+                  className={`inline-flex h-14 items-center justify-center whitespace-nowrap rounded-[2px] bg-[#333131] font-medium text-white transition-[width,padding,font-size,background-color,color] duration-200 ease-out motion-reduce:transition-none disabled:cursor-not-allowed disabled:bg-[#ECECEC] disabled:text-[#CDCDCD] sm:w-auto sm:px-5 sm:text-[1em] ${
+                    isMobileTypingLocation
+                      ? "w-full px-2 text-[0.86em]"
+                      : "w-auto px-4 text-[0.95em]"
+                  }`}
                   onClick={submitLocationForAnalysis}
+                  aria-label={isStartingAnalysis ? "Starting analysis" : "Analyze this location"}
                 >
-                  {isStartingAnalysis ? "Starting analysis..." : "Analyze this location"}
+                  {isStartingAnalysis
+                    ? (isMobileTypingLocation ? "Starting..." : "Starting analysis...")
+                    : (isMobileTypingLocation ? "Analyze" : "Analyze this location")}
                 </button>
               </div>
             </section>
@@ -229,5 +243,3 @@ function parseCoordinates(rawValue: string): Coordinates | null {
 function areSameLocationPoint(a: SelectedLocation, b: SelectedLocation): boolean {
   return Math.abs(a.latitude - b.latitude) < 0.000001 && Math.abs(a.longitude - b.longitude) < 0.000001;
 }
-
-

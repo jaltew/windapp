@@ -10,6 +10,7 @@ interface LocationSearchProps {
   onQueryChange: (nextValue: string) => void;
   onSelectSuggestion: (suggestion: LocationSuggestion) => void;
   onSubmitRawQuery: (query: string) => boolean;
+  onInputFocusChange?: (isFocused: boolean) => void;
 }
 
 export function LocationSearch({
@@ -19,7 +20,8 @@ export function LocationSearch({
   errorMessage,
   onQueryChange,
   onSelectSuggestion,
-  onSubmitRawQuery
+  onSubmitRawQuery,
+  onInputFocusChange
 }: LocationSearchProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(-1);
@@ -104,14 +106,41 @@ export function LocationSearch({
   const isActiveFieldState = isInputFocused || query.trim().length > 0;
 
   return (
-    <div className="relative" onBlur={(event) => !event.currentTarget.contains(event.relatedTarget) && setIsOpen(false)}>
+    <div
+      className="relative"
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+          setIsOpen(false);
+          onInputFocusChange?.(false);
+        }
+      }}
+    >
       <div className="relative">
+        <span
+          aria-hidden="true"
+          className="pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2 text-[#9F9F9F]"
+        >
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="m21 21-4.34-4.34" />
+            <circle cx="11" cy="11" r="8" />
+          </svg>
+        </span>
         <input
           id="location-search"
           name="location-search"
           type="text"
           autoComplete="off"
-          className={`h-14 w-full rounded-[2px] border bg-white px-4 py-0 text-base leading-[56px] shadow-sm transition placeholder:text-transparent ${
+          className={`h-14 w-full rounded-[2px] border bg-white pl-11 pr-4 py-0 text-base leading-[56px] shadow-sm transition placeholder:text-transparent ${
             isActiveFieldState
               ? "border-[#525252]"
               : "border-[#CDCDCD]"
@@ -127,6 +156,7 @@ export function LocationSearch({
           onFocus={() => {
             setIsOpen(true);
             setIsInputFocused(true);
+            onInputFocusChange?.(true);
           }}
           onBlur={() => setIsInputFocused(false)}
           onKeyDown={handleKeyDown}
@@ -138,7 +168,7 @@ export function LocationSearch({
         />
         <label
           htmlFor="location-search"
-          className={`pointer-events-none absolute left-3 bg-white px-1 transition-all ${
+          className={`pointer-events-none absolute left-10 bg-white px-1 transition-all ${
             isLabelFloating ? "-top-2 text-xs" : "top-1/2 -translate-y-1/2 text-base"
           }`}
           style={{
@@ -150,7 +180,7 @@ export function LocationSearch({
       </div>
 
       {showPanel ? (
-        <div className="absolute z-20 mt-2 w-full rounded-[2px] border border-[#CDCDCD] bg-[#F6F6F6] p-2 shadow-[0_1px_9px_4px_rgba(181,181,181,0.1804)]">
+        <div className="absolute bottom-[calc(100%+0.5rem)] z-20 w-full rounded-[2px] border border-[#CDCDCD] bg-[#F6F6F6] p-2 shadow-[0_1px_9px_4px_rgba(181,181,181,0.1804)] sm:bottom-auto sm:top-full sm:mt-2">
           {panelState === "loading" ? (
             <p className="rounded-[2px] px-3 py-2 text-sm text-[#7A7A7A]">Finding locations...</p>
           ) : null}
