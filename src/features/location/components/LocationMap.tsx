@@ -7,7 +7,7 @@ import maplibregl, {
 import "maplibre-gl/dist/maplibre-gl.css";
 import type { SelectedLocation } from "../../../types/location";
 import type { MapViewState } from "../../../types/map";
-
+import { setTurbineVideoSource } from "../../../lib/turbineVideo";
 const DEFAULT_BASMAP_STYLE: StyleSpecification = {
   version: 8,
   sources: {
@@ -43,7 +43,6 @@ const EARTH_RADIUS_METERS = 6_371_008.8;
 const SELECTION_SOURCE_ID = "selected-location-circle-source";
 const SELECTION_FILL_LAYER_ID = "selected-location-circle-fill";
 const SELECTION_OUTLINE_LAYER_ID = "selected-location-circle-outline";
-const TURBINE_VIDEO_SRC = "/media/turbine-top-alpha.webm";
 
 const EMPTY_SELECTION: FeatureCollection<Polygon> = {
   type: "FeatureCollection",
@@ -458,7 +457,7 @@ function createTurbineMarkerElement(): HTMLDivElement {
   container.style.pointerEvents = "none";
 
   const video = document.createElement("video");
-  video.src = TURBINE_VIDEO_SRC;
+  setTurbineVideoSource(video);
   video.loop = true;
   video.muted = true;
   video.autoplay = true;
@@ -561,4 +560,3 @@ function destinationPoint(
     longitude: wrappedLongitude
   };
 }
-

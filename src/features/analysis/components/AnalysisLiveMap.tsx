@@ -10,7 +10,7 @@ import { WindRoseMapOverlay } from "./WindRoseMapOverlay";
 import type { AnalysisLandcoverPreviewEvent } from "../../../types/analysis";
 import type { SelectedLocation } from "../../../types/location";
 import type { MapViewState } from "../../../types/map";
-
+import { setTurbineVideoSource } from "../../../lib/turbineVideo";
 const DEFAULT_BASMAP_STYLE: StyleSpecification = {
   version: 8,
   sources: {
@@ -58,7 +58,6 @@ const TREES_FILL_LAYER_ID = "analysis-trees-fill";
 const TREES_OUTLINE_LAYER_ID = "analysis-trees-outline";
 const LANDCOVER_SOURCE_ID = "analysis-landcover-source";
 const LANDCOVER_LAYER_ID = "analysis-landcover-layer";
-const TURBINE_VIDEO_SRC = "/media/turbine-top-alpha.webm";
 
 const EMPTY_FEATURE_COLLECTION: FeatureCollection<Geometry> = {
   type: "FeatureCollection",
@@ -651,7 +650,7 @@ function createTurbineMarkerElement(): HTMLDivElement {
   container.style.pointerEvents = "none";
 
   const video = document.createElement("video");
-  video.src = TURBINE_VIDEO_SRC;
+  setTurbineVideoSource(video);
   video.loop = true;
   video.muted = true;
   video.autoplay = true;
@@ -896,4 +895,3 @@ function easeToStepThreeDefaultView(
     essential: true
   });
 }
-
